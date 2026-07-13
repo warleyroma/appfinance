@@ -1,3 +1,4 @@
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -50,6 +51,7 @@ type ModoSalario = "dia_fixo" | "dia_util";
 
 type Estado = {
   salario: number;
+  ticketTransporte?: number; // campo adicionado
   modoSalario: ModoSalario;
   diaSalario: number; // usado quando modo = dia_fixo
   diaUtilSalario: number; // usado quando modo = dia_util (ex.: 5 = 5º dia útil)
@@ -62,6 +64,7 @@ const STORAGE_KEY = "qpg.mvp.v2";
 
 const estadoInicial: Estado = {
   salario: 0,
+  ticketTransporte: 0, // inicializado com zero
   modoSalario: "dia_fixo",
   diaSalario: 5,
   diaUtilSalario: 5,
@@ -223,9 +226,12 @@ function AppMvp() {
       .filter((l) => l.terceiro)
       .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
 
+    // Soma o Ticket Transporte à renda total
+    const rendaTotal = estado.salario + (estado.ticketTransporte || 0);
+
     const disponivelCiclo = Math.max(
       0,
-      estado.salario - fixasFuturas - debitoCiclo - faturas,
+      rendaTotal - fixasFuturas - debitoCiclo - faturas,
     );
     const porDia = disponivelCiclo / diasAte;
 
@@ -238,6 +244,7 @@ function AppMvp() {
       gastosTerceiros,
       disponivelCiclo,
       porDia,
+      rendaTotal,
     };
   }, [estado, hoje]);
 
@@ -279,7 +286,7 @@ function AppMvp() {
         </p>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-4">
-          <Metric label="Salário" valor={estado.salario} />
+          <Metric label="Renda total" valor={calculo.rendaTotal} />
           <Metric label="Contas fixas" valor={calculo.fixasFuturas} negative />
           <Metric label="Débito no ciclo" valor={calculo.debitoCiclo} negative />
           <Metric label="Faturas abertas" valor={calculo.faturas} negative />
@@ -299,6 +306,16 @@ function AppMvp() {
               className={inputCls}
             />
           </Field>
+          <Field label="Ticket Transporte / VT (R$)">
+            <input
+              type="number"
+              value={estado.ticketTransporte || ""}
+              onChange={(e) =>
+                setEstado((s) => ({ ...s, ticketTransporte: Number(e.target.value) || 0 }))
+              }
+              className={inputCls}
+            />
+          </Field>
           <Field label="Como você recebe?">
             <select
               value={estado.modoSalario}
@@ -308,7 +325,7 @@ function AppMvp() {
               className={inputCls}
             >
               <option value="dia_fixo">Dia fixo do mês (ex.: todo dia 5)</option>
-              <option value="dia_util">N-ésimo dia útil (ex.: 5º dia útil)</option>
+              <option value="dia_util">Dia útil(ex.: 5º dia útil)</option>
             </select>
           </Field>
           {estado.modoSalario === "dia_fixo" ? (
@@ -434,7 +451,7 @@ function AppMvp() {
                 ? "débito"
                 : l.tipo === "credito_avista"
                   ? `${c?.nome ?? "cartão"} · à vista`
-                  : `${c?.nome ?? "cartão"} · ${l.parcelas || 1}x`;
+                  : `${c?.nome ?? "cartão"} · ${l.parcelas || 1}`;
             return (
               <>
                 <div>
