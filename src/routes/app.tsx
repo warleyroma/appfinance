@@ -51,8 +51,8 @@ type ModoSalario = "dia_fixo" | "dia_util";
 type Estado = {
   salario: number;
   ticketTransporte?: number;
-  adiantamento?: number; // Novo campo para o vale/quinzena
-  diaAdiantamento?: number; // Novo campo para o dia do vale
+  adiantamento?: number; // campo adicionado
+  diaAdiantamento?: number; // campo adicionado
   modoSalario: ModoSalario;
   diaSalario: number; // usado quando modo = dia_fixo
   diaUtilSalario: number; // usado quando modo = dia_util (ex.: 5 = 5º dia útil)
@@ -65,7 +65,7 @@ const STORAGE_KEY = "qpg.mvp.v2";
 
 const estadoInicial: Estado = {
   salario: 0,
-  ticketTransporte: 0,
+  ticketTransporte: 0, // inicializado com zero
   adiantamento: 0, // inicializado com zero
   diaAdiantamento: 15, // inicializado por padrão no dia 15
   modoSalario: "dia_fixo",
@@ -125,7 +125,6 @@ function proximoDiaUtilSalario(n: number, base: Date) {
   return nthDiaUtil(d.getFullYear(), d.getMonth() + 1, n);
 }
 
-// Calcula dias entre datas de forma segura
 function diasEntre(a: Date, b: Date) {
   const ms = b.getTime() - a.getTime();
   return Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
@@ -245,8 +244,6 @@ function AppMvp() {
       .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
 
     // 5. Define qual é a Renda Ativa que está financiando este ciclo atual:
-    // Se o próximo dinheiro a cair for o Adiantamento, estamos vivendo do Salário + VT.
-    // Se o próximo dinheiro a cair for o Salário, estamos vivendo apenas do Adiantamento.
     const rendaCicloAtivo = temAdiantamento && proxSalario === proxPagamentoPrincipal
       ? (estado.adiantamento || 0)
       : estado.salario + (estado.ticketTransporte || 0);
@@ -260,6 +257,36 @@ function AppMvp() {
     // Apenas informativo: soma mensal de todas as receitas
     const rendaMensalTotal = estado.salario + (estado.ticketTransporte || 0) + (estado.adiantamento || 0);
 
+    // 6. --- CÁLCULO DA PROJEÇÃO DO PRÓXIMO CICLO (A ESPIADA) ---
+    const temProximoCiclo = temAdiantamento;
+    
+    const fimProximoCiclo = (() => {
+      if (!temProximoCiclo) return proxSalario;
+      if (proxSalario === proxAdiantamento) {
+        return proxPagamentoPrincipal;
+      } else {
+        // Se o atual termina no salário, o próximo termina no adiantamento seguinte
+        return proximaData(estado.diaAdiantamento || 15, proxPagamentoPrincipal);
+      }
+    })();
+
+    const diasProximoCiclo = temProximoCiclo ? diasEntre(proxSalario, fimProximoCiclo) : 1;
+
+    const rendaProximoCiclo = temProximoCiclo
+      ? (proxSalario === proxAdiantamento
+          ? (estado.adiantamento || 0)
+          : estado.salario + (estado.ticketTransporte || 0))
+      : rendaCicloAtivo;
+
+    const fixasProximoCiclo = estado.fixas.reduce((s, f) => {
+      if (!temProximoCiclo) return 0;
+      const venc = proximaData(f.diaVencimento, proxSalario);
+      return venc > proxSalario && venc <= fimProximoCiclo ? s + f.valor : s;
+    }, 0);
+
+    const disponivelProximoCiclo = Math.max(0, rendaProximoCiclo - fixasProximoCiclo);
+    const porDiaProximoCiclo = disponivelProximoCiclo / diasProximoCiclo;
+
     return {
       proxSalario,
       diasAte,
@@ -271,6 +298,12 @@ function AppMvp() {
       porDia,
       rendaTotal: rendaCicloAtivo,
       rendaMensalTotal,
+      // Dados de projeção para a "Espiada":
+      temProximoCiclo,
+      fimProximoCiclo,
+      diasProximoCiclo,
+      disponivelProximoCiclo,
+      porDiaProximoCiclo,
     };
   }, [estado, hoje]);
 
@@ -310,6 +343,20 @@ function AppMvp() {
             </>
           )}
         </p>
+
+        {/* ESPIADA NO PRÓXIMO CICLO (🔮 MODO SIMULAÇÃO) */}
+        {calculo.temProximoCiclo && (
+          <div className="mt-5 rounded-xl bg-accent/10 border border-accent/25 p-4 text-xs sm:text-sm text-accent-foreground flex items-start gap-3">
+            <span className="text-lg">🔮</span>
+            <div>
+              <span className="font-semibold block sm:inline">Espiada no amanhã:</span> A partir de{" "}
+              <strong>{calculo.proxSalario.toLocaleString("pt-BR", { day: "2-digit", month: "short" })}</strong>,
+              sua projeção diária será de <strong>{brl(calculo.porDiaProximoCiclo)} por dia</strong> até{" "}
+              {calculo.fimProximoCiclo.toLocaleString("pt-BR", { day: "2-digit", month: "short" })}{" "}
+              ({calculo.diasProximoCiclo} dias · {brl(calculo.disponivelProximoCiclo)} livres após contas fixas).
+            </div>
+          </div>
+        )}
 
         <div className="mt-6 grid gap-4 sm:grid-cols-4">
           <Metric label="Renda do Ciclo" valor={calculo.rendaTotal} />
