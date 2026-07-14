@@ -248,10 +248,35 @@ function AppMvp() {
   const [editTerceiro, setEditTerceiro] = useState(false);
   const [editTerceiroNome, setEditTerceiroNome] = useState("");
 
+  // MIGRADO AUTOMÁTICO EM SEGUNDO PLANO: Corrige dados legados sem IDs que travavam a edição
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setEstado({ ...estadoInicial, ...JSON.parse(raw) });
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        
+        // Garante que cada lançamento, fixa ou cartão possua estritamente um ID único e válido
+        const lancamentosMapeados = (parsed.lancamentos || []).map((l: any) => ({
+          ...l,
+          id: l.id || uid(),
+        }));
+        const fixasMapeadas = (parsed.fixas || []).map((f: any) => ({
+          ...f,
+          id: f.id || uid(),
+        }));
+        const cardsMapeados = (parsed.cards || []).map((c: any) => ({
+          ...c,
+          id: c.id || uid(),
+        }));
+
+        setEstado({
+          ...estadoInicial,
+          ...parsed,
+          lancamentos: lancamentosMapeados,
+          fixas: fixasMapeadas,
+          cards: cardsMapeados,
+        });
+      }
     } catch {
       /* ignore */
     }
@@ -400,7 +425,7 @@ function AppMvp() {
               descricao: editDescricao,
               valor: editValor,
               tipo: editTipo,
-              cardId: (editTipo === "credito_avista" || editTipo === "credito_parcelado") ? editCardId : undefined,
+              cardId: (editTipo === "credito_avista" || editTipo === "credito_parcelado") ? (editCardId || undefined) : undefined,
               parcelas: editTipo === "credito_parcelado" ? editParcelas : undefined,
               parcelaAtual: (editTipo === "credito_parcelado" && editEmAndamento) ? editParcelaAtual : undefined,
               emAndamento: (editTipo === "credito_parcelado" && editEmAndamento) ? true : undefined,
@@ -796,12 +821,14 @@ function AppMvp() {
 
                       <div className="flex justify-end gap-2 pt-2">
                         <button
+                          type="button"
                           onClick={() => setIdEditando(null)}
                           className="rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
                         >
                           Cancelar
                         </button>
                         <button
+                          type="button"
                           onClick={salvarEdicao}
                           className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 cursor-pointer"
                         >
