@@ -1,3 +1,6 @@
+================================================
+FILE: src/routes/app.tsx
+================================================
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -116,6 +119,7 @@ function nthDiaUtil(ano: number, mes: number, n: number) {
   return new Date(ano, mes + 1, 0);
 }
 
+// Retorna a próxima ocorrência futura de um determinado dia do mês
 function proximaData(diaAlvo: number, base: Date) {
   const d = new Date(base);
   d.setHours(0, 0, 0, 0);
@@ -127,6 +131,22 @@ function proximaData(diaAlvo: number, base: Date) {
   if (alvo < d) {
     const ultimoProx = new Date(ano, mes + 2, 0).getDate();
     alvo = new Date(ano, mes + 1, Math.min(diaAlvo, ultimoProx));
+  }
+  return alvo;
+}
+
+// Retorna a última ocorrência passada de um determinado dia do mês (essencial para retroceder ciclos!)
+function obterUltimaData(diaAlvo: number, base: Date) {
+  const d = new Date(base);
+  d.setHours(0, 0, 0, 0);
+  const ano = d.getFullYear();
+  const mes = d.getMonth();
+  const ultimoDia = new Date(ano, mes + 1, 0).getDate();
+  const dia = Math.min(diaAlvo, ultimoDia);
+  let alvo = new Date(ano, mes, dia);
+  if (alvo > d) {
+    const ultimoAnterior = new Date(ano, mes, 0).getDate();
+    alvo = new Date(ano, mes - 1, Math.min(diaAlvo, ultimoAnterior));
   }
   return alvo;
 }
@@ -294,6 +314,7 @@ function AppMvp() {
   }, []);
 
   const calculo = useMemo(() => {
+    // 1. Calcula os próximos recebimentos futuros (salário principal e adiantamento)
     const proxPagamentoPrincipal =
       estado.modoSalario === "dia_util"
         ? proximoDiaUtilSalario(estado.diaUtilSalario, hoje)
@@ -304,35 +325,68 @@ function AppMvp() {
       ? proximaData(estado.diaAdiantamento || 15, hoje)
       : null;
 
+    // Fim do subciclo ativo
     const proxSalario = proxAdiantamento && proxAdiantamento < proxPagamentoPrincipal
       ? proxAdiantamento
       : proxPagamentoPrincipal;
 
     const diasAte = diasEntre(hoje, proxSalario);
 
-    // CORREÇÃO DE LÓGICA: Contas que vencem estritamente ANTES da nova renda entrar (venc < proxSalario)
+    // 2. CORREÇÃO DE LÓGICA RETROSPECTIVA: Encontra quando o ciclo ativo de fato INICIOU no passado
+    const ultimoPagamentoPrincipal = (() => {
+      if (estado.modoSalario === "dia_util") {
+        const dPrincipalNoMes = nthDiaUtil(hoje.getFullYear(), hoje.getMonth(), estado.diaUtilSalario);
+        if (dPrincipalNoMes > hoje) {
+          // Se o dia útil do mês atual ainda não chegou, o último foi o do mês passado
+          const anoAnterior = hoje.getMonth() === 0 ? hoje.getFullYear() - 1 : hoje.getFullYear();
+          const mesAnterior = hoje.getMonth() === 0 ? 11 : hoje.getMonth() - 1;
+          return nthDiaUtil(anoAnterior, mesAnterior, estado.diaUtilSalario);
+        }
+        return dPrincipalNoMes;
+      } else {
+        return obterUltimaData(estado.diaSalario, hoje);
+      }
+    })();
+
+    const ultimoAdiantamento = temAdiantamento
+      ? obterUltimaData(estado.diaAdiantamento || 15, hoje)
+      : null;
+
+    // A data exata de início do ciclo corrente (o último pagamento ocorrido de fato)
+    const inicioCiclo = temAdiantamento && ultimoAdiantamento && ultimoAdiantamento > ultimoPagamentoPrincipal
+      ? ultimoAdiantamento
+      : ultimoPagamentoPrincipal;
+
+    // 3. Mapeia contas fixas que vencem estritamente dentro deste subciclo ativo (antes de cair o próximo pagamento)
     const fixasFuturas = estado.fixas.reduce((s, f) => {
       const venc = proximaData(f.diaVencimento, hoje);
       return venc < proxSalario ? s + f.valor : s;
     }, 0);
 
+    // CORREÇÃO DE LÓGICA CRÍTICA: Filtra débitos pertencentes estritamente ao ciclo atual (desde o início do ciclo até hoje)
     const debitoCiclo = estado.lancamentos
       .filter((l) => l.tipo === "debito" && !l.terceiro)
       .filter((l) => {
         const d = new Date(l.data);
-        return diasEntre(d, hoje) <= 30 && d <= hoje;
+        d.setHours(0, 0, 0, 0);
+        return d >= inicioCiclo && d <= hoje;
       })
       .reduce((s, l) => s + l.valor, 0);
 
-    const faturas = estado.cards.reduce(
-      (s, c) => s + calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, hoje), false),
-      0,
-    );
+    // CORREÇÃO DE LÓGICA CRÍTICA: Faturas de cartões só deduzem do ciclo ativo se vencerem antes da próxima renda entrar (vencRef < proxSalario)
+    const faturas = estado.cards.reduce((s, c) => {
+      const vencRef = proximaData(c.vencimento, hoje);
+      if (vencRef < proxSalario) {
+        return s + calcularFatura(c, estado.lancamentos, vencRef, false);
+      }
+      return s;
+    }, 0);
 
     const gastosTerceiros = estado.lancamentos
       .filter((l) => l.terceiro)
       .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
 
+    // Renda Ativa que está financiando este ciclo atual
     const rendaCicloAtivo = temAdiantamento && proxSalario === proxPagamentoPrincipal
       ? (estado.adiantamento || 0)
       : estado.salario + (estado.ticketTransporte || 0);
@@ -372,10 +426,15 @@ function AppMvp() {
       return venc >= proxSalario && venc < fimProximoCiclo ? s + f.valor : s;
     }, 0);
 
-    const faturasProximoCiclo = estado.cards.reduce(
-      (s, c) => s + calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, proxSalario), false),
-      0,
-    );
+    // CORREÇÃO DE LÓGICA: Faturas do próximo ciclo de forma rigorosa (vencRef >= proxSalario && vencRef < fimProximoCiclo)
+    const faturasProximoCiclo = estado.cards.reduce((s, c) => {
+      if (!temProximoCiclo) return 0;
+      const vencRef = proximaData(c.vencimento, proxSalario);
+      if (vencRef >= proxSalario && vencRef < fimProximoCiclo) {
+        return s + calcularFatura(c, estado.lancamentos, vencRef, false);
+      }
+      return s;
+    }, 0);
 
     const disponivelProximoCiclo = Math.max(0, rendaProximoCiclo - fixasProximoCiclo - faturasProximoCiclo);
     const porDiaProximoCiclo = disponivelProximoCiclo / diasProximoCiclo;
@@ -1193,7 +1252,7 @@ function FormLanc({
             />
             <span>Não é meu — não contar no cálculo</span>
           </label>
-        </Field>
+        </div>
       </div>
       {terceiro && (
         <div className="lg:col-span-4">
