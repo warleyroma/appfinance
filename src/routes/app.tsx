@@ -1,6 +1,3 @@
-================================================
-FILE: src/routes/app.tsx
-================================================
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -35,7 +32,7 @@ type Card = {
 
 type Fixa = { id: string; nome: string; valor: number; diaVencimento: number };
 
-type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno";
+type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno" | "credito_recorrente";
 
 type Lancamento = {
   id: string;
@@ -48,9 +45,12 @@ type Lancamento = {
   parcelaAtual?: number; 
   emAndamento?: boolean; 
   dataRegistro?: string; // Data em que o lançamento foi inserido no app
+  ativo?: boolean; // Controle de desativação de assinaturas recorrentes
   terceiro?: boolean; 
   terceiroNome?: string;
 };
+
+type ModoSalario = "dia_fixo" | "dia_util";
 
 type Estado = {
   salario: number;
@@ -174,6 +174,23 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
         return total;
       }
 
+      // Cobrança recorrente (Assinatura): cobra todo mês por tempo indeterminado enquanto ativo
+      if (l.tipo === "credito_recorrente") {
+        if (l.ativo === false) return total; // Se cancelada, não soma à fatura
+        
+        const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
+        let fechCompra = fechNoMes;
+        if (compDate > fechNoMes) {
+          fechCompra = new Date(compDate.getFullYear(), compDate.getMonth() + 1, Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 2, 0).getDate()));
+        }
+
+        const diffMeses = (fechRef.getFullYear() - fechCompra.getFullYear()) * 12 + (fechRef.getMonth() - fechCompra.getMonth());
+        if (diffMeses >= 0) {
+          return total + l.valor;
+        }
+        return total;
+      }
+
       if (l.tipo === "credito_parcelado") {
         const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
         let fechCompra = fechNoMes;
@@ -209,12 +226,10 @@ function obterLabelParcela(l: Lancamento, card?: Card, hoje?: Date) {
   return `finalizada (${l.parcelas}x)`;
 }
 
-// ---------- Componente ----------
 function AppMvp() {
   const [estado, setEstado] = useState<Estado>(estadoInicial);
   const [hidratado, setHidratado] = useState(false);
 
-  // Estados para Controle de Edição de Lançamentos
   const [idEditando, setIdEditando] = useState<string | null>(null);
   const [editDescricao, setEditDescricao] = useState("");
   const [editValor, setEditValor] = useState<number>(0);
@@ -227,13 +242,11 @@ function AppMvp() {
   const [editTerceiro, setEditTerceiro] = useState(false);
   const [editTerceiroNome, setEditTerceiroNome] = useState("");
 
-  // Estados para Controle de Edição de Contas Fixas
   const [idEditandoFixa, setIdEditandoFixa] = useState<string | null>(null);
   const [editFixaNome, setEditFixaNome] = useState("");
   const [editFixaValor, setEditFixaValor] = useState<number>(0);
   const [editFixaDia, setEditFixaDia] = useState(10);
 
-  // Estados para Controle de Edição de Cartões de Crédito
   const [idEditandoCard, setIdEditandoCard] = useState<string | null>(null);
   const [editCardNome, setEditCardNome] = useState("");
   const [editCardLimite, setEditCardLimite] = useState<number>(0);
@@ -245,7 +258,7 @@ function AppMvp() {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        const lancamentosMapeados = (parsed.lancamentos || []).map((l: any) => ({ ...l, id: l.id || uid(), dataRegistro: l.dataRegistro || l.data }));
+        const lancamentosMapeados = (parsed.lancamentos || []).map((l: any) => ({ ...l, id: l.id || uid(), dataRegistro: l.dataRegistro || l.data, ativo: l.ativo !== undefined ? l.ativo : true }));
         const fixasMapeadas = (parsed.fixas || []).map((f: any) => ({ ...f, id: f.id || uid() }));
         const cardsMapeados = (parsed.cards || []).map((c: any) => ({ ...c, id: c.id || uid() }));
         setEstado({ ...estadoInicial, ...parsed, lancamentos: lancamentosMapeados, fixas: fixasMapeadas, cards: cardsMapeados });
@@ -321,10 +334,6 @@ function AppMvp() {
       return vencRef < proxSalario ? s + calcularFatura(c, estado.lancamentos, vencRef, false) : s;
     }, 0);
 
-    const gastosTerceiros = estado.lancamentos
-      .filter((l) => l.terceiro)
-      .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
-
     // Renda Ativa que está financiando este ciclo atual
     const rendaCicloAtivo = temAdiantamento && proxSalario === proximoPagamento
       ? (estado.adiantamento || 0)
@@ -386,6 +395,21 @@ function AppMvp() {
 
   const iniciarEdicao = (l: Lancamento) => { setIdEditando(l.id); setEditDescricao(l.descricao); setEditValor(l.valor); setEditTipo(l.tipo); setEditCardId(l.cardId || ""); setEditParcelas(l.parcelas || 2); setEditParcelaAtual(l.parcelaAtual || 2); setEditEmAndamento(!!l.emAndamento); setEditData(l.data); setEditTerceiro(!!l.terceiro); setEditTerceiroNome(l.terceiroNome || ""); };
   const salvarEdicao = () => { setEstado((s) => ({ ...s, lancamentos: s.lancamentos.map((l) => l.id === idEditando ? { ...l, descricao: editDescricao, valor: editValor, tipo: editTipo, cardId: (editTipo.includes("credito") || editTipo === "estorno") ? (editCardId || undefined) : undefined, parcelas: editTipo === "credito_parcelado" ? editParcelas : undefined, parcelaAtual: (editTipo === "credito_parcelado" && editEmAndamento) ? editParcelaAtual : undefined, emAndamento: (editTipo === "credito_parcelado" && editEmAndamento) ? true : undefined, data: editData, terceiro: editTerceiro || undefined, terceiroNome: editTerceiro && editTerceiroNome ? editTerceiroNome : undefined } : l) })); setIdEditando(null); };
+
+  // Controladores Rápidos de Assinaturas (Cancelar e Reativar)
+  const cancelarAssinatura = (id: string) => {
+    setEstado((s) => ({
+      ...s,
+      lancamentos: s.lancamentos.map((l) => l.id === id ? { ...l, ativo: false } : l),
+    }));
+  };
+
+  const reativarAssinatura = (id: string) => {
+    setEstado((s) => ({
+      ...s,
+      lancamentos: s.lancamentos.map((l) => l.id === id ? { ...l, ativo: true } : l),
+    }));
+  };
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-14">
@@ -509,6 +533,7 @@ function AppMvp() {
                     <option value="estorno">Estorno</option>
                     <option value="credito_avista">À vista</option>
                     <option value="credito_parcelado">Parcelado</option>
+                    <option value="credito_recorrente">Recorrente (Assinatura)</option>
                   </select>
                 </Field>
                 <Field label="Data"><input type="date" value={editData} onChange={(e) => setEditData(e.target.value)} className={inputCls} /></Field>
@@ -538,17 +563,38 @@ function AppMvp() {
                         ? "débito" 
                         : l.tipo === "estorno"
                           ? `${l.cardId ? `estorno no ${estado.cards.find(x => x.id === l.cardId)?.nome}` : "estorno em conta"}`
-                          : `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · ${obterLabelParcela(l, estado.cards.find(x => x.id === l.cardId), hoje)}`
+                          : l.tipo === "credito_recorrente"
+                            ? `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · assinatura ${l.ativo === false ? "(cancelada)" : ""}`
+                            : `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · ${obterLabelParcela(l, estado.cards.find(x => x.id === l.cardId), hoje)}`
                     }
                   </p>
                 </div>
                 <p className={`font-semibold ${l.tipo === "estorno" ? "text-green-600" : ""}`}>{l.tipo === "estorno" ? "+" : ""}{brl(l.valor)}</p>
               </div>
-              <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicao(l)} className="text-xs underline cursor-pointer">editar</button><button onClick={() => setEstado(s => ({ ...s, lancamentos: s.lancamentos.filter(x => x.id !== l.id) }))} className="text-xs text-destructive underline cursor-pointer">remover</button></div>
+              <div className="flex gap-2 ml-4">
+                {l.tipo === "credito_recorrente" && (
+                  <button
+                    onClick={() => {
+                      if (l.ativo === false) {
+                        reativarAssinatura(l.id);
+                      } else {
+                        if (confirm(`Deseja parar de pagar a assinatura "${l.descricao}"?`)) {
+                          cancelarAssinatura(l.id);
+                        }
+                      }
+                    }}
+                    className={`text-xs underline cursor-pointer font-medium ${l.ativo === false ? "text-green-600 hover:text-green-700" : "text-amber-600 hover:text-amber-700"}`}
+                  >
+                    {l.ativo === false ? "reativar" : "cancelar"}
+                  </button>
+                )}
+                <button onClick={() => iniciarEdicao(l)} className="text-xs underline cursor-pointer">editar</button>
+                <button onClick={() => setEstado(s => ({ ...s, lancamentos: s.lancamentos.filter(x => x.id !== l.id) }))} className="text-xs text-destructive underline cursor-pointer">remover</button>
+              </div>
             </li>
           ))}
         </ul>
-        <FormLanc cards={estado.cards} onAdd={(l) => setEstado((s) => ({ ...s, lancamentos: [...s.lancamentos, { ...l, id: uid(), dataRegistro: hoje.toISOString().slice(0, 10) }] }))} />
+        <FormLanc cards={estado.cards} onAdd={(l) => setEstado((s) => ({ ...s, lancamentos: [...s.lancamentos, { ...l, id: uid(), dataRegistro: hoje.toISOString().slice(0, 10), ativo: true }] }))} />
       </Bloco>
 
       <div className="mt-16 flex items-center justify-between border-t border-border pt-6 text-sm text-muted-foreground">
@@ -577,5 +623,5 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
 function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento, "id">) => void }) {
   const [descricao, setDescricao] = useState(""); const [valor, setValor] = useState<number>(0); const [tipo, setTipo] = useState<TipoLanc>("debito"); const [cardId, setCardId] = useState(""); const [parcelas, setParcelas] = useState("2"); const [data, setData] = useState(new Date().toISOString().slice(0, 10)); const [terceiro, setTerceiro] = useState(false); const [emAndamento, setEmAndamento] = useState(false); const [parcelaAtual, setParcelaAtual] = useState("2");
   const ehCredito = tipo.includes("credito") || tipo === "estorno"; const ehParcelado = tipo === "credito_parcelado";
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
 }
