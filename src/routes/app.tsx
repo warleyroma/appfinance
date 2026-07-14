@@ -1249,7 +1249,7 @@ function FormLanc({
             />
             <span>Não é meu — não contar no cálculo</span>
           </label>
-        </div>
+        </Field>
       </div>
       {terceiro && (
         <div className="lg:col-span-4">
