@@ -37,12 +37,14 @@ type TipoLanc = "debito" | "credito_avista" | "credito_parcelado";
 type Lancamento = {
   id: string;
   descricao: string;
-  valor: number;
+  valor: number; // Para compras novas: valor total. Para em andamento: valor da parcela unitária.
   data: string; // ISO yyyy-mm-dd
   tipo: TipoLanc;
   cardId?: string;
-  parcelas?: number; // total de parcelas (para credito_parcelado)
-  terceiro?: boolean; // gasto de terceiro no seu cartão — não entra no cálculo pessoal
+  parcelas?: number; // total de parcelas
+  parcelaAtual?: number; // parcela atual (para compras já em andamento, ex: 2)
+  emAndamento?: boolean; // indica se é um parcelamento antigo já em andamento
+  terceiro?: boolean; // gasto de terceiro no seu cartão
   terceiroNome?: string;
 };
 
@@ -51,8 +53,8 @@ type ModoSalario = "dia_fixo" | "dia_util";
 type Estado = {
   salario: number;
   ticketTransporte?: number;
-  adiantamento?: number; // campo adicionado
-  diaAdiantamento?: number; // campo adicionado
+  adiantamento?: number;
+  diaAdiantamento?: number;
   modoSalario: ModoSalario;
   diaSalario: number; // usado quando modo = dia_fixo
   diaUtilSalario: number; // usado quando modo = dia_util (ex.: 5 = 5º dia útil)
@@ -65,9 +67,9 @@ const STORAGE_KEY = "qpg.mvp.v2";
 
 const estadoInicial: Estado = {
   salario: 0,
-  ticketTransporte: 0, // inicializado com zero
-  adiantamento: 0, // inicializado com zero
-  diaAdiantamento: 15, // inicializado por padrão no dia 15
+  ticketTransporte: 0,
+  adiantamento: 0,
+  diaAdiantamento: 15,
   modoSalario: "dia_fixo",
   diaSalario: 5,
   diaUtilSalario: 5,
@@ -84,7 +86,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 
 function ehDiaUtil(d: Date) {
   const dow = d.getDay();
-  return dow !== 0 && dow !== 6; // ignora sáb/dom (feriados nacionais ficam para depois)
+  return dow !== 0 && dow !== 6;
 }
 
 // Retorna a data do N-ésimo dia útil do mês/ano informado
@@ -98,7 +100,6 @@ function nthDiaUtil(ano: number, mes: number, n: number) {
     }
     d.setDate(d.getDate() + 1);
   }
-  // fallback: último dia do mês
   return new Date(ano, mes + 1, 0);
 }
 
@@ -130,49 +131,96 @@ function diasEntre(a: Date, b: Date) {
   return Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
 }
 
-// Fatura em aberto do cartão (apenas gastos próprios, ignora terceiros)
-function faturaAberta(card: Card, lancs: Lancamento[], hoje: Date) {
-  const ultimoFech = (() => {
-    const d = new Date(hoje);
-    d.setHours(0, 0, 0, 0);
-    const ultimoDia = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-    const diaF = Math.min(card.fechamento, ultimoDia);
-    let f = new Date(d.getFullYear(), d.getMonth(), diaF);
-    if (f > d) f = new Date(d.getFullYear(), d.getMonth() - 1, diaF);
-    return f;
-  })();
-
-  return lancs
-    .filter(
-      (l) =>
-        (l.tipo === "credito_avista" || l.tipo === "credito_parcelado") &&
-        l.cardId === card.id &&
-        !l.terceiro,
-    )
-    .filter((l) => new Date(l.data) > ultimoFech && new Date(l.data) <= hoje)
-    .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
+// Encontra a data de fechamento correspondente a uma data de vencimento específica
+function obterFechamentoParaVencimento(vencDate: Date, fechDay: number, vencDay: number) {
+  const d = new Date(vencDate);
+  d.setHours(0, 0, 0, 0);
+  if (fechDay >= vencDay) {
+    // O fechamento ocorreu no mês anterior ao vencimento da fatura
+    d.setMonth(d.getMonth() - 1);
+  }
+  const ultimoDia = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(fechDay, ultimoDia));
+  return d;
 }
 
-// Total lançado no cartão (incluindo terceiros) — para mostrar uso real do limite
-function faturaTotalCartao(card: Card, lancs: Lancamento[], hoje: Date) {
-  const ultimoFech = (() => {
-    const d = new Date(hoje);
-    d.setHours(0, 0, 0, 0);
-    const ultimoDia = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-    const diaF = Math.min(card.fechamento, ultimoDia);
-    let f = new Date(d.getFullYear(), d.getMonth(), diaF);
-    if (f > d) f = new Date(d.getFullYear(), d.getMonth() - 1, diaF);
-    return f;
-  })();
-
+// Calcula o valor total devido em uma fatura específica de cartão
+function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, considerarTerceiros: boolean) {
+  const fechRef = obterFechamentoParaVencimento(vencRef, card.fechamento, card.vencimento);
+  
   return lancs
-    .filter(
-      (l) =>
-        (l.tipo === "credito_avista" || l.tipo === "credito_parcelado") &&
-        l.cardId === card.id,
-    )
-    .filter((l) => new Date(l.data) > ultimoFech && new Date(l.data) <= hoje)
-    .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
+    .filter((l) => l.cardId === card.id && (considerarTerceiros || !l.terceiro))
+    .reduce((total, l) => {
+      const compDate = new Date(l.data);
+      compDate.setHours(0, 0, 0, 0);
+
+      // 1. Caso: Crédito à vista
+      if (l.tipo === "credito_avista") {
+        const fechAnterior = new Date(fechRef);
+        fechAnterior.setMonth(fechAnterior.getMonth() - 1);
+        
+        if (compDate > fechAnterior && compDate <= fechRef) {
+          return total + l.valor;
+        }
+        return total;
+      }
+
+      // 2. Caso: Crédito parcelado (Novo ou Em Andamento)
+      if (l.tipo === "credito_parcelado") {
+        const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
+        let fechCompra = fechNoMes;
+        if (compDate > fechNoMes) {
+          fechCompra = new Date(compDate.getFullYear(), compDate.getMonth() + 1, Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 2, 0).getDate()));
+        }
+
+        const diffMeses = (fechRef.getFullYear() - fechCompra.getFullYear()) * 12 + (fechRef.getMonth() - fechCompra.getMonth());
+
+        if (l.emAndamento) {
+          // Compra em andamento: valor inserido já é unitário da parcela
+          const parcelaAtualNoCiclo = (l.parcelaAtual || 1) + diffMeses;
+          if (parcelaAtualNoCiclo > 0 && parcelaAtualNoCiclo <= (l.parcelas || 1)) {
+            return total + l.valor;
+          }
+        } else {
+          // Compra nova: divide o valor total pelas parcelas
+          if (diffMeses >= 0 && diffMeses < (l.parcelas || 1)) {
+            return total + (l.valor / (l.parcelas || 1));
+          }
+        }
+      }
+
+      return total;
+    }, 0);
+}
+
+// Retorna uma string descritiva amigável do andamento de uma parcela (ex: "parcela 2/3")
+function obterLabelParcela(l: Lancamento, card?: Card, hoje?: Date) {
+  if (l.tipo !== "credito_parcelado") return "";
+  if (!card || !hoje) return `${l.parcelas}x`;
+  
+  const vencCorrente = proximaData(card.vencimento, hoje);
+  const fechRef = obterFechamentoParaVencimento(vencCorrente, card.fechamento, card.vencimento);
+  
+  const compDate = new Date(l.data);
+  compDate.setHours(0, 0, 0, 0);
+  
+  const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
+  let fechCompra = fechNoMes;
+  if (compDate > fechNoMes) {
+    fechCompra = new Date(compDate.getFullYear(), compDate.getMonth() + 1, Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 2, 0).getDate()));
+  }
+  
+  const diffMeses = (fechRef.getFullYear() - fechCompra.getFullYear()) * 12 + (fechRef.getMonth() - fechCompra.getMonth());
+  
+  const numParcela = l.emAndamento 
+    ? (l.parcelaAtual || 1) + diffMeses 
+    : diffMeses + 1;
+    
+  if (numParcela > 0 && numParcela <= (l.parcelas || 1)) {
+    return `parcela ${numParcela}/${l.parcelas}`;
+  }
+  
+  return `finalizada (${l.parcelas}x)`;
 }
 
 // ---------- Componente ----------
@@ -234,8 +282,9 @@ function AppMvp() {
       })
       .reduce((s, l) => s + l.valor, 0);
 
+    // Faturas ativas do ciclo corrente (deduzidas hoje)
     const faturas = estado.cards.reduce(
-      (s, c) => s + faturaAberta(c, estado.lancamentos, hoje),
+      (s, c) => s + calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, hoje), false),
       0,
     );
 
@@ -243,7 +292,7 @@ function AppMvp() {
       .filter((l) => l.terceiro)
       .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
 
-    // 5. Define qual é a Renda Ativa que está financiando este ciclo atual:
+    // 5. Define qual é a Renda Ativa que está financiando este ciclo atual
     const rendaCicloAtivo = temAdiantamento && proxSalario === proxPagamentoPrincipal
       ? (estado.adiantamento || 0)
       : estado.salario + (estado.ticketTransporte || 0);
@@ -265,7 +314,6 @@ function AppMvp() {
       if (proxSalario === proxAdiantamento) {
         return proxPagamentoPrincipal;
       } else {
-        // Se o atual termina no salário, o próximo termina no adiantamento seguinte
         return proximaData(estado.diaAdiantamento || 15, proxPagamentoPrincipal);
       }
     })();
@@ -284,7 +332,13 @@ function AppMvp() {
       return venc > proxSalario && venc <= fimProximoCiclo ? s + f.valor : s;
     }, 0);
 
-    const disponivelProximoCiclo = Math.max(0, rendaProximoCiclo - fixasProximoCiclo);
+    // Faturas previstas para vencer estritamente no próximo ciclo (essencial para a espiada precisa!)
+    const faturasProximoCiclo = estado.cards.reduce(
+      (s, c) => s + calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, proxSalario), false),
+      0,
+    );
+
+    const disponivelProximoCiclo = Math.max(0, rendaProximoCiclo - fixasProximoCiclo - faturasProximoCiclo);
     const porDiaProximoCiclo = disponivelProximoCiclo / diasProximoCiclo;
 
     return {
@@ -353,7 +407,7 @@ function AppMvp() {
               <strong>{calculo.proxSalario.toLocaleString("pt-BR", { day: "2-digit", month: "short" })}</strong>,
               sua projeção diária será de <strong>{brl(calculo.porDiaProximoCiclo)} por dia</strong> até{" "}
               {calculo.fimProximoCiclo.toLocaleString("pt-BR", { day: "2-digit", month: "short" })}{" "}
-              ({calculo.diasProximoCiclo} dias · {brl(calculo.disponivelProximoCiclo)} livres após contas fixas).
+              ({calculo.diasProximoCiclo} dias · {brl(calculo.disponivelProximoCiclo)} livres após contas fixas e faturas previstas).
             </div>
           </div>
         )}
@@ -507,8 +561,9 @@ function AppMvp() {
           items={estado.cards}
           empty="Nenhum cartão cadastrado."
           render={(c) => {
-            const fat = faturaAberta(c, estado.lancamentos, hoje);
-            const total = faturaTotalCartao(c, estado.lancamentos, hoje);
+            const vencCorrente = proximaData(c.vencimento, hoje);
+            const fat = calcularFatura(c, estado.lancamentos, vencCorrente, false);
+            const total = calcularFatura(c, estado.lancamentos, vencCorrente, true);
             const terceiro = total - fat;
             return (
               <>
@@ -546,12 +601,13 @@ function AppMvp() {
           empty="Nenhum lançamento ainda."
           render={(l) => {
             const c = estado.cards.find((x) => x.id === l.cardId);
+            const labelParcelamento = obterLabelParcela(l, c, hoje);
             const tipoLabel =
               l.tipo === "debito"
                 ? "débito"
                 : l.tipo === "credito_avista"
                   ? `${c?.nome ?? "cartão"} · à vista`
-                  : `${c?.nome ?? "cartão"} · ${l.parcelas || 1}`;
+                  : `${c?.nome ?? "cartão"} · ${labelParcelamento}`;
             return (
               <>
                 <div>
@@ -751,8 +807,13 @@ function FormLanc({
   const [data, setData] = useState(hoje);
   const [terceiro, setTerceiro] = useState(false);
   const [terceiroNome, setTerceiroNome] = useState("");
+  
+  // Novos estados para parcelamentos em andamento
+  const [emAndamento, setEmAndamento] = useState(false);
+  const [parcelaAtual, setParcelaAtual] = useState("2");
 
   const ehCredito = tipo === "credito_avista" || tipo === "credito_parcelado";
+  const ehParcelado = tipo === "credito_parcelado";
 
   return (
     <form
@@ -769,7 +830,9 @@ function FormLanc({
           data,
           tipo,
           cardId: ehCredito ? cardId : undefined,
-          parcelas: tipo === "credito_parcelado" ? Number(parcelas) : undefined,
+          parcelas: ehParcelado ? Number(parcelas) : undefined,
+          parcelaAtual: ehParcelado && emAndamento ? Number(parcelaAtual) : undefined,
+          emAndamento: ehParcelado && emAndamento ? true : undefined,
           terceiro: terceiro || undefined,
           terceiroNome: terceiro && terceiroNome ? terceiroNome : undefined,
         });
@@ -777,14 +840,16 @@ function FormLanc({
         setValor("");
         setTerceiro(false);
         setTerceiroNome("");
+        setEmAndamento(false);
+        setParcelaAtual("2");
       }}
       className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
     >
       <Field label="Descrição">
         <input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} placeholder="Ex.: Mercado" />
       </Field>
-      <Field label="Valor (R$)">
-        <input type="number" value={valor} onChange={(e) => setValor(e.target.value)} className={inputCls} />
+      <Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}>
+        <input type="number" value={valor} onChange={(e) => setValor(e.target.value)} className={inputCls} placeholder={ehParcelado && emAndamento ? "Apenas uma parcela" : "0"} />
       </Field>
       <Field label="Tipo">
         <select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}>
@@ -807,30 +872,62 @@ function FormLanc({
           </select>
         </Field>
       )}
-      {tipo === "credito_parcelado" && (
-        <Field label="Parcelas">
+      {ehParcelado && (
+        <Field label="Total de Parcelas">
           <input type="number" min={2} value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} />
         </Field>
       )}
 
-      <Field label="Gasto de terceiro?">
-        <label className="flex items-center gap-2 text-sm text-foreground">
-          <input
-            type="checkbox"
-            checked={terceiro}
-            onChange={(e) => setTerceiro(e.target.checked)}
-            className="h-4 w-4"
+      {ehParcelado && (
+        <div className="flex items-center gap-2 pt-6">
+          <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={emAndamento}
+              onChange={(e) => setEmAndamento(e.target.checked)}
+              className="h-4 w-4"
+            />
+            <span>Já está em andamento (fatura anterior)?</span>
+          </label>
+        </div>
+      )}
+
+      {ehParcelado && emAndamento && (
+        <Field label="Qual a Parcela Atual?">
+          <input 
+            type="number" 
+            min={1} 
+            max={Number(parcelas) || 12} 
+            value={parcelaAtual} 
+            onChange={(e) => setParcelaAtual(e.target.value)} 
+            className={inputCls} 
+            placeholder="Ex: se é 2/3, digite 2"
           />
-          <span>Não é meu — não contar no cálculo</span>
-        </label>
-      </Field>
-      {terceiro && (
-        <Field label="Nome de quem gastou (opcional)">
-          <input value={terceiroNome} onChange={(e) => setTerceiroNome(e.target.value)} className={inputCls} placeholder="Ex.: Mãe" />
         </Field>
       )}
 
-      <div className="lg:col-span-4">
+      <div className={ehParcelado ? "sm:col-span-2 lg:col-span-4" : "lg:col-span-4"}>
+        <Field label="Gasto de terceiro?">
+          <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={terceiro}
+              onChange={(e) => setTerceiro(e.target.checked)}
+              className="h-4 w-4"
+            />
+            <span>Não é meu — não contar no cálculo</span>
+          </label>
+        </Field>
+      </div>
+      {terceiro && (
+        <div className="lg:col-span-4">
+          <Field label="Nome de quem gastou (opcional)">
+            <input value={terceiroNome} onChange={(e) => setTerceiroNome(e.target.value)} className={inputCls} placeholder="Ex.: Mãe" />
+          </Field>
+        </div>
+      )}
+
+      <div className="lg:col-span-4 mt-2">
         <button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90">
           Adicionar lançamento
         </button>
