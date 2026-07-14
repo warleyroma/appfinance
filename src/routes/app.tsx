@@ -34,7 +34,7 @@ type Fixa = {
   id: string; 
   nome: string; 
   valor: number; 
-  dataVencimento: string; // Modificado para data exata ISO
+  dataVencimento: string; // data exata ISO
 };
 
 type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno" | "credito_recorrente";
@@ -42,7 +42,7 @@ type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno" | 
 type Lancamento = {
   id: string;
   descricao: string;
-  valor: number; // Para compras novas: valor total. Para em andamento: valor da parcela unitária.
+  valor: number; 
   data: string; // ISO yyyy-mm-dd
   tipo: TipoLanc;
   cardId?: string;
@@ -85,7 +85,7 @@ const obterDataPadrao = (dia: number, offsetMes: number) => {
 const estadoInicial: Estado = {
   salario: 0,
   ticketTransporte: 0,
-  temAdiantamento: false, // Desmarcado por padrão
+  temAdiantamento: false, 
   adiantamento: 0,
   dataUltimoSalario: obterDataPadrao(5, 0),
   dataProximoSalario: obterDataPadrao(5, 1),
@@ -130,7 +130,6 @@ function ehDiaUtil(d: Date) {
   return dow !== 0 && dow !== 6;
 }
 
-// Retorna a data do N-ésimo dia útil do mês/ano informado
 function nthDiaUtil(ano: number, mes: number, n: number) {
   const d = new Date(ano, mes, 1);
   let count = 0;
@@ -183,7 +182,7 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
     .reduce((total, l) => {
       const compDate = parseLocalDate(l.emAndamento ? (l.dataRegistro || l.data) : l.data);
 
-      if (l.tipo === "credito_ सविता" || l.tipo === "credito_avista") {
+      if (l.tipo === "credito_avista") {
         const fechAnterior = new Date(fechRef);
         fechAnterior.setMonth(fechAnterior.getMonth() - 1);
         if (compDate > fechAnterior && compDate <= fechRef) return total + l.valor;
@@ -200,7 +199,7 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
 
       // Cobrança recorrente (Assinatura): cobra todo mês por tempo indeterminado enquanto ativo
       if (l.tipo === "credito_recorrente") {
-        if (l.ativo === false) return total; // Se cancelada, não soma à fatura
+        if (l.ativo === false) return total; 
         
         const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
         let fechCompra = fechNoMes;
@@ -260,11 +259,101 @@ function obterProximoVencimentoExato(f: Fixa, hoje: Date): Date {
   return venc;
 }
 
+// Algoritmo de Inteligência de Leitura e Parsing de Faturas por Texto (Regex)
+function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<Lancamento, "id">[] {
+  const lines = text.split("\n");
+  const results: Omit<Lancamento, "id">[] = [];
+  
+  const mesesMap: Record<string, number> = {
+    jan: 0, fev: 1, mar: 2, abr: 3, mai: 4, jun: 5, 
+    jul: 6, ago: 7, set: 8, out: 9, nov: 10, dez: 11
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const dateRegex = /(\d{1,2})[\/\s]([a-zA-Z]{3,4}|\d{1,2})(?:[\/\s](\d{2,4}))?/;
+    const valueRegex = /(?:R\$\s*)?([1-9]\d{0,2}(?:\.\d{3})*,\d{2}|[1-9]\d*,\d{2}|\d+\.\d{2})/;
+
+    const dateMatch = line.match(dateRegex);
+    const valueMatch = line.match(valueRegex);
+
+    if (dateMatch && valueMatch) {
+      const dia = parseInt(dateMatch[1]);
+      const mesStr = dateMatch[2].toLowerCase();
+      let mes = parseInt(mesStr) - 1;
+      if (isNaN(mes)) {
+        const mesChave = mesStr.slice(0, 3);
+        mes = mesesMap[mesChave] !== undefined ? mesesMap[mesChave] : hoje.getMonth();
+      }
+      const ano = dateMatch[3] ? parseInt(dateMatch[3]) : hoje.getFullYear();
+      const anoCompleto = ano < 100 ? 2000 + ano : ano;
+      
+      const dataLancamento = new Date(anoCompleto, mes, dia, 0, 0, 0, 0).toISOString().slice(0, 10);
+      const valorStr = valueMatch[1].replace(/\./g, "").replace(",", ".");
+      const valor = parseFloat(valorStr);
+
+      let descricao = line
+        .replace(dateMatch[0], "")
+        .replace(valueMatch[0], "")
+        .replace(/R\$/g, "")
+        .replace(/[\/-]/g, "")
+        .trim();
+
+      if (!descricao) descricao = "Compra Importada";
+
+      // Auto-detecção de compras já parceladas em andamento (procurando padrões como "02/10" ou "2x")
+      const parcelamentoMatch = line.match(/(\d{1,2})[\s]*[x\/][\s]*(\d{1,2})/);
+      let parcelas: number | undefined = undefined;
+      let parcelaAtual: number | undefined = undefined;
+      let emAndamento: boolean | undefined = undefined;
+
+      if (parcelamentoMatch) {
+        parcelaAtual = parseInt(parcelamentoMatch[1]);
+        parcelas = parseInt(parcelamentoMatch[2]);
+        emAndamento = true;
+      }
+
+      results.push({
+        descricao,
+        valor,
+        data: dataLancamento,
+        tipo: parcelamentoMatch ? "credito_parcelado" : "credito_avista",
+        cardId: cardId || undefined,
+        parcelas,
+        parcelaAtual,
+        emAndamento,
+        ativo: true
+      });
+    }
+  }
+  return results;
+}
+
+// Auxiliar para tentar identificar o ID do cartão baseado no texto da fatura colada
+function detectarCartaoPorTexto(text: string, cards: Card[]): string {
+  const lower = text.toLowerCase();
+  for (const c of cards) {
+    if (lower.includes(c.nome.toLowerCase())) return c.id;
+  }
+  if (lower.includes("nubank") || lower.includes("roxinho")) {
+    const card = cards.find(c => c.nome.toLowerCase().includes("nubank") || c.nome.toLowerCase().includes("nu"));
+    if (card) return card.id;
+  }
+  if (lower.includes("itau") || lower.includes("itaú")) {
+    const card = cards.find(c => c.nome.toLowerCase().includes("itau"));
+    if (card) return card.id;
+  }
+  return cards[0]?.id || "";
+}
+
 // ---------- Componente ----------
 function AppMvp() {
   const [estado, setEstado] = useState<Estado>(estadoInicial);
   const [hidratado, setHidratado] = useState(false);
 
+  // Estados para Controle de Edição de Lançamentos
   const [idEditando, setIdEditando] = useState<string | null>(null);
   const [editDescricao, setEditDescricao] = useState("");
   const [editValor, setEditValor] = useState<number>(0);
@@ -277,16 +366,24 @@ function AppMvp() {
   const [editTerceiro, setEditTerceiro] = useState(false);
   const [editTerceiroNome, setEditTerceiroNome] = useState("");
 
+  // Estados para Controle de Edição de Contas Fixas
   const [idEditandoFixa, setIdEditandoFixa] = useState<string | null>(null);
   const [editFixaNome, setEditFixaNome] = useState("");
   const [editFixaValor, setEditFixaValor] = useState<number>(0);
   const [editFixaDataVencimento, setEditFixaDataVencimento] = useState("");
 
+  // Estados para Controle de Edição de Cartões de Crédito
   const [idEditandoCard, setIdEditandoCard] = useState<string | null>(null);
   const [editCardNome, setEditCardNome] = useState("");
   const [editCardLimite, setEditCardLimite] = useState<number>(0);
   const [editCardFech, setEditCardFech] = useState(25);
   const [editCardVenc, setEditCardVenc] = useState(5);
+
+  // Estados do Importador Inteligente por Texto (🪄 Copia e Cola)
+  const [mostrarImportador, setMostrarImportador] = useState(false);
+  const [textoFatura, setTextoFatura] = useState("");
+  const [cartaoImportadorId, setCartaoImportadorId] = useState("");
+  const [importacoesPrevia, setImportacoesPrevia] = useState<(Omit<Lancamento, "id"> & { tempId: string; selecionado: boolean })[]>([]);
 
   useEffect(() => {
     try {
@@ -463,6 +560,38 @@ function AppMvp() {
     }));
   };
 
+  // Executa o parser e carrega as transações identificadas na caixa de pré-visualização
+  const rodarParserFatura = () => {
+    if (!textoFatura) return;
+    const cardDetectado = detectarCartaoPorTexto(textoFatura, estado.cards) || cartaoImportadorId;
+    setCartaoImportadorId(cardDetectado);
+
+    const resultado = parsePastedInvoiceText(textoFatura, cardDetectado, hoje);
+    setImportacoesPrevia(resultado.map(item => ({ ...item, tempId: uid(), selecionado: true })));
+  };
+
+  // Confirma e importa em lote todos os lançamentos marcados para o estado
+  const confirmarImportacaoLote = () => {
+    const listosParaImportar = importacoesPrevia
+      .filter(item => item.selecionado)
+      .map(({ tempId, selecionado, ...rest }) => ({
+        ...rest,
+        id: uid(),
+        dataRegistro: hoje.toISOString().slice(0, 10)
+      }));
+
+    if (listosParaImportar.length === 0) {
+      alert("Nenhum lançamento selecionado!");
+      return;
+    }
+
+    setEstado((s) => ({ ...s, lancamentos: [...s.lancamentos, ...listosParaImportar] }));
+    setTextoFatura("");
+    setImportacoesPrevia([]);
+    setMostrarImportador(false);
+    alert(`${listosParaImportar.length} lançamentos importados com sucesso!`);
+  };
+
   return (
     <main className="mx-auto max-w-5xl px-6 py-14">
       <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">← Voltar ao roadmap</Link>
@@ -529,39 +658,33 @@ function AppMvp() {
         </div>
       </Bloco>
 
-      {/* FIXAS COM EDIÇÃO INLINE */}
       <Bloco titulo="2. Contas fixas">
-        {estado.fixas.length === 0 ? (
-          <p className="text-sm text-muted-foreground">Nenhuma conta fixa cadastrada.</p>
-        ) : (
-          <ul className="divide-y divide-border">
-            {estado.fixas.map((f) => idEditandoFixa === f.id ? (
-              <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <Field label="Nome"><input value={editFixaNome} onChange={(e) => setEditFixaNome(e.target.value)} className={inputCls} /></Field>
-                  <Field label="Valor"><input type="text" value={formatarMoedaInput(editFixaValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditFixaValor(Number(d) / 100); }} className={inputCls} /></Field>
-                  <Field label="Vencimento"><input type="date" value={editFixaDataVencimento} onChange={(e) => setEditFixaDataVencimento(e.target.value)} className={inputCls} /></Field>
+        <ul className="divide-y divide-border">
+          {estado.fixas.map((f) => idEditandoFixa === f.id ? (
+            <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <Field label="Nome"><input value={editFixaNome} onChange={(e) => setEditFixaNome(e.target.value)} className={inputCls} /></Field>
+                <Field label="Valor"><input type="text" value={formatarMoedaInput(editFixaValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditFixaValor(Number(d) / 100); }} className={inputCls} /></Field>
+                <Field label="Vencimento"><input type="date" value={editFixaDataVencimento} onChange={(e) => setEditFixaDataVencimento(e.target.value)} className={inputCls} /></Field>
+              </div>
+              <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoFixa(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoFixa} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
+            </li>
+          ) : (
+            <li key={f.id} className="flex items-center justify-between py-3">
+              <div className="flex-1 flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium">{f.nome}</p>
+                  <p className="text-xs text-muted-foreground">Próximo vencimento: {obterProximoVencimentoExato(f, hoje).toLocaleDateString("pt-BR")}</p>
                 </div>
-                <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoFixa(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoFixa} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
-              </li>
-            ) : (
-              <li key={f.id} className="flex items-center justify-between py-3">
-                <div className="flex-1 flex items-center justify-between gap-4">
-                  <div>
-                    <p className="font-medium">{f.nome}</p>
-                    <p className="text-xs text-muted-foreground">Próximo vencimento: {obterProximoVencimentoExato(f, hoje).toLocaleDateString("pt-BR")}</p>
-                  </div>
-                  <p className="font-semibold">{brl(f.valor)}</p>
-                </div>
-                <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoFixa(f)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, fixas: s.fixas.filter(x => x.id !== f.id) }))} className="text-xs text-destructive underline">remover</button></div>
-              </li>
-            ))}
-          </ul>
-        )}
+                <p className="font-semibold">{brl(f.valor)}</p>
+              </div>
+              <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoFixa(f)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, fixas: s.fixas.filter(x => x.id !== f.id) }))} className="text-xs text-destructive underline">remover</button></div>
+            </li>
+          ))}
+        </ul>
         <FormFixa onAdd={(f) => setEstado((s) => ({ ...s, fixas: [...s.fixas, { ...f, id: uid() }] }))} />
       </Bloco>
 
-      {/* CARDS COM EDIÇÃO INLINE */}
       <Bloco titulo="3. Cartões de crédito">
         <ul className="divide-y divide-border">
           {estado.cards.map((c) => idEditandoCard === c.id ? (
@@ -586,79 +709,182 @@ function AppMvp() {
 
       {/* LANÇAMENTOS COM EDIÇÃO INLINE */}
       <Bloco titulo="4. Lançamentos">
-        <ul className="divide-y divide-border">
-          {[...estado.lancamentos].sort((a, b) => a.data < b.data ? 1 : -1).map((l) => idEditando === l.id ? (
-            <li key={l.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <Field label="Descrição"><input value={editDescricao} onChange={(e) => setEditDescricao(e.target.value)} className={inputCls} /></Field>
-                <Field label="Valor"><input type="text" value={formatarMoedaInput(editValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditValor(Number(d) / 100); }} className={inputCls} /></Field>
-                <Field label="Tipo">
-                  <select value={editTipo} onChange={(e) => setEditTipo(e.target.value as TipoLanc)} className={inputCls}>
-                    <option value="debito">Débito</option>
-                    <option value="estorno">Estorno</option>
-                    <option value="credito_avista">À vista</option>
-                    <option value="credito_parcelado">Parcelado</option>
-                    <option value="credito_recorrente">Recorrente (Assinatura)</option>
-                  </select>
+        {/* BOTÃO DO IMPORTADOR INTELIGENTE (🪄 COPIA-E-COLA) */}
+        <div className="mb-4">
+          <button
+            type="button"
+            onClick={() => setMostrarImportador(!mostrarImportador)}
+            className="flex items-center gap-1.5 rounded-md border border-input bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent cursor-pointer"
+          >
+            {mostrarImportador ? "❌ Fechar Importador" : "🪄 Importador Inteligente (Copia-e-Cola)"}
+          </button>
+        </div>
+
+        {/* ÁREA DO IMPORTADOR DE FATURA */}
+        {mostrarImportador && (
+          <div className="mb-6 space-y-4 rounded-xl border border-dashed border-accent/40 bg-accent/5 p-4">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Abra o app ou PDF do seu banco, copie os lançamentos da sua fatura e cole no campo abaixo. Nosso algoritmo lerá automaticamente as datas, valores e identificará parcelas antigas!
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Cartão de Destino">
+                <select value={cartaoImportadorId} onChange={(e) => setCartaoImportadorId(e.target.value)} className={inputCls}>
+                  <option value="">Selecione um cartão...</option>
+                  {estado.cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}
+                </select>
+              </Field>
+              <div className="hidden sm:block"></div>
+              <div className="sm:col-span-2">
+                <Field label="Texto copiado da fatura">
+                  <textarea
+                    rows={4}
+                    value={textoFatura}
+                    onChange={(e) => setTextoFatura(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring"
+                    placeholder="Ex.:&#10;12/07 Uber R$ 25,50&#10;14 JUL POSTO IPIRANGA 120,00&#10;15 JUL COMPRA PARCELADA 02/05 50,00"
+                  />
                 </Field>
-                <Field label="Data"><input type="date" value={editData} onChange={(e) => setEditData(e.target.value)} className={inputCls} /></Field>
-                
-                {(editTipo.includes("credito") || editTipo === "estorno") && (
-                  <Field label={editTipo === "estorno" ? "Cartão (opcional)" : "Cartão"}>
-                    <select value={editCardId} onChange={(e) => setEditCardId(e.target.value)} className={inputCls}>
-                      <option value="">{editTipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>
-                      {estado.cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={rodarParserFatura}
+                className="rounded-md bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground hover:bg-accent/95 cursor-pointer"
+              >
+                Analisar Texto da Fatura
+              </button>
+            </div>
+
+            {/* PRÉ-VISUALIZAÇÃO DE COMPRAS IMPORTADAS COM CHECKBOXES */}
+            {importacoesPrevia.length > 0 && (
+              <div className="mt-4 space-y-3 rounded-lg border border-border bg-background p-4">
+                <h4 className="font-serif text-sm font-semibold text-foreground">Compras detectadas na fatura ({importacoesPrevia.length})</h4>
+                <p className="text-[11px] text-muted-foreground">Confira os lançamentos lidos e desmarque os que não deseja importar:</p>
+                <div className="max-h-48 overflow-y-auto divide-y divide-border pr-2">
+                  {importacoesPrevia.map((item, index) => {
+                    const card = estado.cards.find(c => c.id === item.cardId);
+                    return (
+                      <div key={item.tempId} className="flex items-center justify-between py-2 text-xs">
+                        <label className="flex items-center gap-2 cursor-pointer flex-1">
+                          <input
+                            type="checkbox"
+                            checked={item.selecionado}
+                            onChange={(e) => {
+                              const updated = [...importacoesPrevia];
+                              updated[index].selecionado = e.target.checked;
+                              setImportacoesPrevia(updated);
+                            }}
+                            className="h-3.5 w-3.5"
+                          />
+                          <div>
+                            <span className="font-semibold">{item.descricao}</span>
+                            <span className="text-[10px] text-muted-foreground block">
+                              {parseLocalDate(item.data).toLocaleDateString("pt-BR")} · {
+                                item.tipo === "credito_parcelado" 
+                                  ? `parcela ${item.parcelaAtual}/${item.parcelas}` 
+                                  : "à vista"
+                              } {card ? `no ${card.nome}` : ""}
+                            </span>
+                          </div>
+                        </label>
+                        <span className="font-mono font-semibold">{brl(item.valor)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="button"
+                    onClick={confirmarImportacaoLote}
+                    className="rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/95 cursor-pointer"
+                  >
+                    Importar Selecionados para o Cartão
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* LISTAGEM PRINCIPAL */}
+        {[...estado.lancamentos].length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhum lançamento ainda.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {[...estado.lancamentos].sort((a, b) => a.data < b.data ? 1 : -1).map((l) => idEditando === l.id ? (
+              <li key={l.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <Field label="Descrição"><input value={editDescricao} onChange={(e) => setEditDescricao(e.target.value)} className={inputCls} /></Field>
+                  <Field label="Valor"><input type="text" value={formatarMoedaInput(editValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditValor(Number(d) / 100); }} className={inputCls} /></Field>
+                  <Field label="Tipo">
+                    <select value={editTipo} onChange={(e) => setEditTipo(e.target.value as TipoLanc)} className={inputCls}>
+                      <option value="debito">Débito</option>
+                      <option value="estorno">Estorno</option>
+                      <option value="credito_avista">À vista</option>
+                      <option value="credito_parcelado">Parcelado</option>
+                      <option value="credito_recorrente">Recorrente (Assinatura)</option>
                     </select>
                   </Field>
-                )}
-              </div>
-              <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditando(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicao} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
-            </li>
-          ) : (
-            <li key={l.id} className="flex items-center justify-between py-3">
-              <div className="flex-1 flex items-center justify-between gap-4">
-                <div>
-                  <p className="font-medium">
-                    {l.descricao}
-                    {l.terceiro && <span className="ml-2 text-[10px] bg-accent/10 px-1 uppercase tracking-wider text-accent font-semibold">terceiro</span>}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {parseLocalDate(l.data).toLocaleDateString("pt-BR")} · {
-                      l.tipo === "debito" 
-                        ? "débito" 
-                        : l.tipo === "estorno"
-                          ? `${l.cardId ? `estorno no ${estado.cards.find(x => x.id === l.cardId)?.nome}` : "estorno em conta"}`
-                          : l.tipo === "credito_recorrente"
-                            ? `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · assinatura ${l.ativo === false ? "(cancelada)" : ""}`
-                            : `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · ${obterLabelParcela(l, estado.cards.find(x => x.id === l.cardId), hoje)}`
-                    }
-                  </p>
+                  <Field label="Data"><input type="date" value={editData} onChange={(e) => setEditData(e.target.value)} className={inputCls} /></Field>
+                  
+                  {(editTipo.includes("credito") || editTipo === "estorno") && (
+                    <Field label={editTipo === "estorno" ? "Cartão (opcional)" : "Cartão"}>
+                      <select value={editCardId} onChange={(e) => setEditCardId(e.target.value)} className={inputCls}>
+                        <option value="">{editTipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>
+                        {estado.cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}
+                      </select>
+                    </Field>
+                  )}
                 </div>
-                <p className={`font-semibold ${l.tipo === "estorno" ? "text-green-600" : ""}`}>{l.tipo === "estorno" ? "+" : ""}{brl(l.valor)}</p>
-              </div>
-              <div className="flex gap-2 ml-4">
-                {l.tipo === "credito_recorrente" && (
-                  <button
-                    onClick={() => {
-                      if (l.ativo === false) {
-                        reativarAssinatura(l.id);
-                      } else {
-                        if (confirm(`Deseja parar de pagar a assinatura "${l.descricao}"?`)) {
-                          cancelarAssinatura(l.id);
-                        }
+                <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditando(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicao} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
+              </li>
+            ) : (
+              <li key={l.id} className="flex items-center justify-between py-3">
+                <div className="flex-1 flex items-center justify-between gap-4">
+                  <div>
+                    <p className="font-medium">
+                      {l.descricao}
+                      {l.terceiro && <span className="ml-2 text-[10px] bg-accent/10 px-1 uppercase tracking-wider text-accent font-semibold">terceiro</span>}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {parseLocalDate(l.data).toLocaleDateString("pt-BR")} · {
+                        l.tipo === "debito" 
+                          ? "débito" 
+                          : l.tipo === "estorno"
+                            ? `${l.cardId ? `estorno no ${estado.cards.find(x => x.id === l.cardId)?.nome}` : "estorno em conta"}`
+                            : l.tipo === "credito_recorrente"
+                              ? `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · assinatura ${l.ativo === false ? "(cancelada)" : ""}`
+                              : `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · ${obterLabelParcela(l, estado.cards.find(x => x.id === l.cardId), hoje)}`
                       }
-                    }}
-                    className={`text-xs underline cursor-pointer font-medium ${l.ativo === false ? "text-green-600 hover:text-green-700" : "text-amber-600 hover:text-amber-700"}`}
-                  >
-                    {l.ativo === false ? "reativar" : "cancelar"}
-                  </button>
-                )}
-                <button onClick={() => iniciarEdicao(l)} className="text-xs underline cursor-pointer">editar</button>
-                <button onClick={() => setEstado(s => ({ ...s, lancamentos: s.lancamentos.filter(x => x.id !== l.id) }))} className="text-xs text-destructive underline cursor-pointer">remover</button>
-              </div>
-            </li>
-          ))}
-        </ul>
+                    </p>
+                  </div>
+                  <p className={`font-semibold ${l.tipo === "estorno" ? "text-green-600" : ""}`}>{l.tipo === "estorno" ? "+" : ""}{brl(l.valor)}</p>
+                </div>
+                <div className="flex gap-2 ml-4">
+                  {l.tipo === "credito_recorrente" && (
+                    <button
+                      onClick={() => {
+                        if (l.ativo === false) {
+                          reativarAssinatura(l.id);
+                        } else {
+                          if (confirm(`Deseja parar de pagar a assinatura "${l.descricao}"?`)) {
+                            cancelarAssinatura(l.id);
+                          }
+                        }
+                      }}
+                      className={`text-xs underline cursor-pointer font-medium ${l.ativo === false ? "text-green-600 hover:text-green-700" : "text-amber-600 hover:text-amber-700"}`}
+                    >
+                      {l.ativo === false ? "reativar" : "cancelar"}
+                    </button>
+                  )}
+                  <button onClick={() => iniciarEdicao(l)} className="text-xs underline cursor-pointer">editar</button>
+                  <button onClick={() => setEstado(s => ({ ...s, lancamentos: s.lancamentos.filter(x => x.id !== l.id) }))} className="text-xs text-destructive underline cursor-pointer">remover</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
         <FormLanc cards={estado.cards} onAdd={(l) => setEstado((s) => ({ ...s, lancamentos: [...s.lancamentos, { ...l, id: uid(), dataRegistro: hoje.toISOString().slice(0, 10), ativo: true }] }))} />
       </Bloco>
 
@@ -688,5 +914,5 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
 function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento, "id">) => void }) {
   const [descricao, setDescricao] = useState(""); const [valor, setValor] = useState<number>(0); const [tipo, setTipo] = useState<TipoLanc>("debito"); const [cardId, setCardId] = useState(""); const [parcelas, setParcelas] = useState("2"); const [data, setData] = useState(new Date().toISOString().slice(0, 10)); const [terceiro, setTerceiro] = useState(false); const [emAndamento, setEmAndamento] = useState(false); const [parcelaAtual, setParcelaAtual] = useState("2");
   const ehCredito = tipo.includes("credito") || tipo === "estorno"; const ehParcelado = tipo === "credito_parcelado";
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_ सविता" value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
 }
