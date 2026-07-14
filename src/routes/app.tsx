@@ -1,3 +1,6 @@
+================================================
+FILE: src/routes/app.tsx
+================================================
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -30,7 +33,12 @@ type Card = {
   vencimento: number; // dia do mês
 };
 
-type Fixa = { id: string; nome: string; valor: number; diaVencimento: number };
+type Fixa = { 
+  id: string; 
+  nome: string; 
+  valor: number; 
+  dataVencimento: string; // Modificado para data exata ISO
+};
 
 type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno" | "credito_recorrente";
 
@@ -120,6 +128,25 @@ function parseLocalDate(dateStr: string): Date {
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
+function ehDiaUtil(d: Date) {
+  const dow = d.getDay();
+  return dow !== 0 && dow !== 6;
+}
+
+// Retorna a data do N-ésimo dia útil do mês/ano informado
+function nthDiaUtil(ano: number, mes: number, n: number) {
+  const d = new Date(ano, mes, 1);
+  let count = 0;
+  while (d.getMonth() === mes) {
+    if (ehDiaUtil(d)) {
+      count++;
+      if (count === n) return new Date(d);
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return new Date(ano, mes + 1, 0);
+}
+
 function proximaData(diaAlvo: number, base: Date) {
   const d = new Date(base);
   d.setHours(0, 0, 0, 0);
@@ -159,7 +186,7 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
     .reduce((total, l) => {
       const compDate = parseLocalDate(l.emAndamento ? (l.dataRegistro || l.data) : l.data);
 
-      if (l.tipo === "credito_avista") {
+      if (l.tipo === "credito_ सविता" || l.tipo === "credito_avista") {
         const fechAnterior = new Date(fechRef);
         fechAnterior.setMonth(fechAnterior.getMonth() - 1);
         if (compDate > fechAnterior && compDate <= fechRef) return total + l.valor;
@@ -226,6 +253,17 @@ function obterLabelParcela(l: Lancamento, card?: Card, hoje?: Date) {
   return `finalizada (${l.parcelas}x)`;
 }
 
+// Retorna o próximo vencimento exato de uma conta fixa rolando-a para o futuro caso já tenha passado
+function obterProximoVencimentoExato(f: Fixa, hoje: Date): Date {
+  let venc = parseLocalDate(f.dataVencimento || obterDataPadrao(10, 0));
+  while (hoje >= venc) {
+    venc = new Date(venc);
+    venc.setMonth(venc.getMonth() + 1);
+  }
+  return venc;
+}
+
+// ---------- Componente ----------
 function AppMvp() {
   const [estado, setEstado] = useState<Estado>(estadoInicial);
   const [hidratado, setHidratado] = useState(false);
@@ -245,7 +283,7 @@ function AppMvp() {
   const [idEditandoFixa, setIdEditandoFixa] = useState<string | null>(null);
   const [editFixaNome, setEditFixaNome] = useState("");
   const [editFixaValor, setEditFixaValor] = useState<number>(0);
-  const [editFixaDia, setEditFixaDia] = useState(10);
+  const [editFixaDataVencimento, setEditFixaDataVencimento] = useState("");
 
   const [idEditandoCard, setIdEditandoCard] = useState<string | null>(null);
   const [editCardNome, setEditCardNome] = useState("");
@@ -259,7 +297,22 @@ function AppMvp() {
       if (raw) {
         const parsed = JSON.parse(raw);
         const lancamentosMapeados = (parsed.lancamentos || []).map((l: any) => ({ ...l, id: l.id || uid(), dataRegistro: l.dataRegistro || l.data, ativo: l.ativo !== undefined ? l.ativo : true }));
-        const fixasMapeadas = (parsed.fixas || []).map((f: any) => ({ ...f, id: f.id || uid() }));
+        
+        // MIGRADO AUTOMÁTICO DE CONTAS FIXAS: Converte o diaVencimento numérico antigo para dataVencimento exata
+        const fixasMapeadas = (parsed.fixas || []).map((f: any) => {
+          let dataVenc = f.dataVencimento;
+          if (!dataVenc && f.diaVencimento) {
+            const dataProvisoria = proximaData(f.diaVencimento, new Date());
+            dataVenc = dataProvisoria.toISOString().slice(0, 10);
+          }
+          return {
+            id: f.id || uid(),
+            nome: f.nome,
+            valor: f.valor,
+            dataVencimento: dataVenc || obterDataPadrao(10, 0)
+          };
+        });
+
         const cardsMapeados = (parsed.cards || []).map((c: any) => ({ ...c, id: c.id || uid() }));
         setEstado({ ...estadoInicial, ...parsed, lancamentos: lancamentosMapeados, fixas: fixasMapeadas, cards: cardsMapeados });
       }
@@ -313,7 +366,7 @@ function AppMvp() {
 
     // 3. Mapeia contas fixas que vencem estritamente dentro deste subciclo ativo
     const fixasFuturas = estado.fixas.reduce((s, f) => {
-      const venc = proximaData(f.diaVencimento, hoje);
+      const venc = obterProximoVencimentoExato(f, hoje);
       return venc < proxSalario ? s + f.valor : s;
     }, 0);
 
@@ -364,12 +417,14 @@ function AppMvp() {
           : estado.salario + (estado.ticketTransporte || 0))
       : rendaCicloAtivo;
 
+    // CORREÇÃO DE LÓGICA: Contas do próximo ciclo de forma rigorosa
     const fixasProximoCiclo = estado.fixas.reduce((s, f) => {
       if (!temProximoCiclo) return 0;
-      const venc = proximaData(f.diaVencimento, proxSalario);
+      const venc = obterProximoVencimentoExato(f, proxSalario);
       return venc >= proxSalario && venc < fimProximoCiclo ? s + f.valor : s;
     }, 0);
 
+    // CORREÇÃO DE LÓGICA: Faturas do próximo ciclo de forma rigorosa
     const faturasProximoCiclo = estado.cards.reduce((s, c) => {
       if (!temProximoCiclo) return 0;
       const vencRef = proximaData(c.vencimento, proxSalario);
@@ -387,8 +442,8 @@ function AppMvp() {
     };
   }, [estado, hoje]);
 
-  const iniciarEdicaoFixa = (f: Fixa) => { setIdEditandoFixa(f.id); setEditFixaNome(f.nome); setEditFixaValor(f.valor); setEditFixaDia(f.diaVencimento); };
-  const salvarEdicaoFixa = () => { setEstado((s) => ({ ...s, fixas: s.fixas.map((f) => f.id === idEditandoFixa ? { ...f, nome: editFixaNome, valor: editFixaValor, diaVencimento: editFixaDia } : f) })); setIdEditandoFixa(null); };
+  const iniciarEdicaoFixa = (f: Fixa) => { setIdEditandoFixa(f.id); setEditFixaNome(f.nome); setEditFixaValor(f.valor); setEditFixaDataVencimento(f.dataVencimento || obterDataPadrao(10, 0)); };
+  const salvarEdicaoFixa = () => { setEstado((s) => ({ ...s, fixas: s.fixas.map((f) => f.id === idEditandoFixa ? { ...f, nome: editFixaNome, valor: editFixaValor, dataVencimento: editFixaDataVencimento } : f) })); setIdEditandoFixa(null); };
 
   const iniciarEdicaoCard = (c: Card) => { setIdEditandoCard(c.id); setEditCardNome(c.nome); setEditCardLimite(c.limite); setEditCardFech(c.fechamento); setEditCardVenc(c.vencimento); };
   const salvarEdicaoCard = () => { setEstado((s) => ({ ...s, cards: s.cards.map((c) => c.id === idEditandoCard ? { ...c, nome: editCardNome, limite: editCardLimite, fechamento: editCardFech, vencimento: editCardVenc } : c) })); setIdEditandoCard(null); };
@@ -477,27 +532,39 @@ function AppMvp() {
         </div>
       </Bloco>
 
+      {/* FIXAS COM EDIÇÃO INLINE */}
       <Bloco titulo="2. Contas fixas">
-        <ul className="divide-y divide-border">
-          {estado.fixas.map((f) => idEditandoFixa === f.id ? (
-            <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="Nome"><input value={editFixaNome} onChange={(e) => setEditFixaNome(e.target.value)} className={inputCls} /></Field>
-                <Field label="Valor"><input type="text" value={formatarMoedaInput(editFixaValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditFixaValor(Number(d) / 100); }} className={inputCls} /></Field>
-                <Field label="Vencimento"><input type="number" value={editFixaDia} onChange={(e) => setEditFixaDia(Number(e.target.value) || 1)} className={inputCls} /></Field>
-              </div>
-              <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoFixa(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoFixa} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
-            </li>
-          ) : (
-            <li key={f.id} className="flex items-center justify-between py-3">
-              <div className="flex-1 flex items-center justify-between gap-4"><div><p className="font-medium">{f.nome}</p><p className="text-xs text-muted-foreground">Dia {f.diaVencimento}</p></div><p className="font-semibold">{brl(f.valor)}</p></div>
-              <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoFixa(f)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, fixas: s.fixas.filter(x => x.id !== f.id) }))} className="text-xs text-destructive underline">remover</button></div>
-            </li>
-          ))}
-        </ul>
+        {estado.fixas.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhuma conta fixa cadastrada.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {estado.fixas.map((f) => idEditandoFixa === f.id ? (
+              <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Field label="Nome"><input value={editFixaNome} onChange={(e) => setEditFixaNome(e.target.value)} className={inputCls} /></Field>
+                  <Field label="Valor"><input type="text" value={formatarMoedaInput(editFixaValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditFixaValor(Number(d) / 100); }} className={inputCls} /></Field>
+                  <Field label="Vencimento"><input type="date" value={editFixaDataVencimento} onChange={(e) => setEditFixaDataVencimento(e.target.value)} className={inputCls} /></Field>
+                </div>
+                <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoFixa(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoFixa} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
+              </li>
+            ) : (
+              <li key={f.id} className="flex items-center justify-between py-3">
+                <div className="flex-1 flex items-center justify-between gap-4">
+                  <div>
+                    <p className="font-medium">{f.nome}</p>
+                    <p className="text-xs text-muted-foreground">Próximo vencimento: {obterProximoVencimentoExato(f, hoje).toLocaleDateString("pt-BR")}</p>
+                  </div>
+                  <p className="font-semibold">{brl(f.valor)}</p>
+                </div>
+                <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoFixa(f)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, fixas: s.fixas.filter(x => x.id !== f.id) }))} className="text-xs text-destructive underline">remover</button></div>
+              </li>
+            ))}
+          </ul>
+        )}
         <FormFixa onAdd={(f) => setEstado((s) => ({ ...s, fixas: [...s.fixas, { ...f, id: uid() }] }))} />
       </Bloco>
 
+      {/* CARDS COM EDIÇÃO INLINE */}
       <Bloco titulo="3. Cartões de crédito">
         <ul className="divide-y divide-border">
           {estado.cards.map((c) => idEditandoCard === c.id ? (
@@ -520,6 +587,7 @@ function AppMvp() {
         <FormCard onAdd={(c) => setEstado((s) => ({ ...s, cards: [...s.cards, { ...c, id: uid() }] }))} />
       </Bloco>
 
+      {/* LANÇAMENTOS COM EDIÇÃO INLINE */}
       <Bloco titulo="4. Lançamentos">
         <ul className="divide-y divide-border">
           {[...estado.lancamentos].sort((a, b) => a.data < b.data ? 1 : -1).map((l) => idEditando === l.id ? (
@@ -611,8 +679,8 @@ function Metric({ label, valor, negative }: { label: string; valor: number; nega
 function Bloco({ titulo, children }: { titulo: string; children: React.ReactNode }) { return (<section className="mt-12"><h2 className="font-serif text-2xl text-foreground">{titulo}</h2><div className="mt-4 rounded-xl border border-border bg-card p-6">{children}</div></section>); }
 
 function FormFixa({ onAdd }: { onAdd: (f: Omit<Fixa, "id">) => void }) {
-  const [nome, setNome] = useState(""); const [valor, setValor] = useState<number>(0); const [dia, setDia] = useState("10");
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!nome || !valor) return; onAdd({ nome, valor, diaVencimento: Number(dia) }); setNome(""); setValor(0); }} className="mt-4 grid gap-3 sm:grid-cols-[1fr_140px_120px_auto]"><input placeholder="Ex.: Aluguel" value={nome} onChange={(e) => setNome(e.target.value)} className={inputCls} /><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /><input type="number" min={1} max={31} value={dia} onChange={(e) => setDia(e.target.value)} className={inputCls} /><button className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar</button></form>);
+  const [nome, setNome] = useState(""); const [valor, setValor] = useState<number>(0); const [dataVencimento, setDataVencimento] = useState(obterDataPadrao(10, 0));
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!nome || !valor) return; onAdd({ nome, valor, dataVencimento }); setNome(""); setValor(0); }} className="mt-4 grid gap-3 sm:grid-cols-[1fr_140px_160px_auto]"><input placeholder="Ex.: Aluguel" value={nome} onChange={(e) => setNome(e.target.value)} className={inputCls} /><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /><input type="date" value={dataVencimento} onChange={(e) => setDataVencimento(e.target.value)} className={inputCls} /><button className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar</button></form>);
 }
 
 function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
