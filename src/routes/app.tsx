@@ -42,7 +42,7 @@ type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno" | 
 type Lancamento = {
   id: string;
   descricao: string;
-  valor: number; 
+  valor: number; // Para compras novas: valor total. Para em andamento: valor da parcela unitária.
   data: string; // ISO yyyy-mm-dd
   tipo: TipoLanc;
   cardId?: string;
@@ -124,24 +124,6 @@ function parseLocalDate(dateStr: string): Date {
 }
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-
-function ehDiaUtil(d: Date) {
-  const dow = d.getDay();
-  return dow !== 0 && dow !== 6;
-}
-
-function nthDiaUtil(ano: number, mes: number, n: number) {
-  const d = new Date(ano, mes, 1);
-  let count = 0;
-  while (d.getMonth() === mes) {
-    if (ehDiaUtil(d)) {
-      count++;
-      if (count === n) return new Date(d);
-    }
-    d.setDate(d.getDate() + 1);
-  }
-  return new Date(ano, mes + 1, 0);
-}
 
 function proximaData(diaAlvo: number, base: Date) {
   const d = new Date(base);
@@ -259,9 +241,9 @@ function obterProximoVencimentoExato(f: Fixa, hoje: Date): Date {
   return venc;
 }
 
-// Algoritmo de Inteligência de Leitura e Parsing de Faturas por Texto (Regex)
+// CORREÇÃO DE REGEX (Parser Multi-Modo): Extrai dados de faturas em linha única ou faturas multi-linhas (Nubank/C6)
 function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<Lancamento, "id">[] {
-  const lines = text.split("\n");
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   const results: Omit<Lancamento, "id">[] = [];
   
   const mesesMap: Record<string, number> = {
@@ -269,42 +251,93 @@ function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<
     jul: 6, ago: 7, set: 8, out: 9, nov: 10, dez: 11
   };
 
+  const dateAloneRegex = /^(\d{1,2})[\/\s]([a-zA-Z]{3,4}|\d{1,2})(?:[\/\s](\d{2,4}))?$/; // Data sozinha na linha (ex: Nubank)
+  const dateInlineRegex = /(\d{1,2})[\/\s]([a-zA-Z]{3,4}|\d{1,2})(?:[\/\s](\d{2,4}))?/; // Data no meio do texto
+  const valueRegex = /(?:R\$\s*)?([1-9]\d{0,2}(?:\.\d{3})*,\d{2}|[1-9]\d*,\d{2}|\d+\.\d{2})/;
+
+  let lastSeenDate: string | null = null;
+  let lastSeenDesc: string | null = null;
+
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+    const line = lines[i];
 
-    const dateRegex = /(\d{1,2})[\/\s]([a-zA-Z]{3,4}|\d{1,2})(?:[\/\s](\d{2,4}))?/;
-    const valueRegex = /(?:R\$\s*)?([1-9]\d{0,2}(?:\.\d{3})*,\d{2}|[1-9]\d*,\d{2}|\d+\.\d{2})/;
-
-    const dateMatch = line.match(dateRegex);
-    const valueMatch = line.match(valueRegex);
-
-    if (dateMatch && valueMatch) {
-      const dia = parseInt(dateMatch[1]);
-      const mesStr = dateMatch[2].toLowerCase();
+    // Caso 1: A linha atual contém apenas uma Data (estrutura multi-linha Nubank)
+    const exactDateMatch = line.match(dateAloneRegex);
+    if (exactDateMatch) {
+      const dia = parseInt(exactDateMatch[1]);
+      const mesStr = exactDateMatch[2].toLowerCase();
       let mes = parseInt(mesStr) - 1;
       if (isNaN(mes)) {
         const mesChave = mesStr.slice(0, 3);
         mes = mesesMap[mesChave] !== undefined ? mesesMap[mesChave] : hoje.getMonth();
       }
-      const ano = dateMatch[3] ? parseInt(dateMatch[3]) : hoje.getFullYear();
+      const ano = exactDateMatch[3] ? parseInt(exactDateMatch[3]) : hoje.getFullYear();
       const anoCompleto = ano < 100 ? 2000 + ano : ano;
-      
-      const dataLancamento = new Date(anoCompleto, mes, dia, 0, 0, 0, 0).toISOString().slice(0, 10);
+      lastSeenDate = new Date(anoCompleto, mes, dia, 0, 0, 0, 0).toISOString().slice(0, 10);
+      continue;
+    }
+
+    // Caso 2: Já temos uma data na memória e a linha atual contém um Valor (estrutura multi-linha)
+    const valueMatch = line.match(valueRegex);
+    if (valueMatch && lastSeenDate) {
       const valorStr = valueMatch[1].replace(/\./g, "").replace(",", ".");
       const valor = parseFloat(valorStr);
 
-      let descricao = line
-        .replace(dateMatch[0], "")
-        .replace(valueMatch[0], "")
-        .replace(/R\$/g, "")
-        .replace(/[\/-]/g, "")
-        .trim();
-
+      let descricao = lastSeenDesc || line.replace(valueMatch[0], "").replace(/R\$/g, "").trim();
       if (!descricao) descricao = "Compra Importada";
 
-      // Auto-detecção de compras já parceladas em andamento (procurando padrões como "02/10" ou "2x")
-      const parcelamentoMatch = line.match(/(\d{1,2})[\s]*[x\/][\s]*(\d{1,2})/);
+      // Verifica parcelamento no texto descritivo
+      const parcelamentoMatch = descricao.match(/(\d{1,2})[\s]*[x\/][\s]*(\d{1,2})/);
+      let parcelas: number | undefined = undefined;
+      let parcelaAtual: number | undefined = undefined;
+      let emAndamento: boolean | undefined = undefined;
+
+      if (parcelamentoMatch) {
+        parcelaAtual = parseInt(parcelamentoMatch[1]);
+        parcelas = parseInt(parcelamentoMatch[2]);
+        emAndamento = true;
+        // Limpa a numeração da descrição
+        descricao = descricao.replace(parcelamentoMatch[0], "").trim();
+      }
+
+      results.push({
+        descricao,
+        valor,
+        data: lastSeenDate,
+        tipo: parcelamentoMatch ? "credito_parcelado" : "credito_avista",
+        cardId: cardId || undefined,
+        parcelas,
+        parcelaAtual,
+        emAndamento,
+        ativo: true
+      });
+
+      lastSeenDate = null;
+      lastSeenDesc = null;
+      continue;
+    }
+
+    // Caso 3: Linha Única (Data, Descrição e Valor na mesma linha - ex: C6/Itaú)
+    const inlineDateMatch = line.match(dateInlineRegex);
+    if (inlineDateMatch && valueMatch) {
+      const dia = parseInt(inlineDateMatch[1]);
+      const mesStr = inlineDateMatch[2].toLowerCase();
+      let mes = parseInt(mesStr) - 1;
+      if (isNaN(mes)) {
+        const mesChave = mesStr.slice(0, 3);
+        mes = mesesMap[mesChave] !== undefined ? mesesMap[mesChave] : hoje.getMonth();
+      }
+      const ano = inlineDateMatch[3] ? parseInt(inlineDateMatch[3]) : hoje.getFullYear();
+      const anoCompleto = ano < 100 ? 2000 + ano : ano;
+      const dataLancamento = new Date(anoCompleto, mes, dia, 0, 0, 0, 0).toISOString().slice(0, 10);
+
+      const valorStr = valueMatch[1].replace(/\./g, "").replace(",", ".");
+      const valor = parseFloat(valorStr);
+
+      // CORREÇÃO CRÍTICA DE REGEX: Removemos a data da string antes de buscar as parcelas para evitar confusão (ex: 08/07 confunfia o regex)
+      const lineWithoutDate = line.replace(inlineDateMatch[0], "").trim();
+
+      const parcelamentoMatch = lineWithoutDate.match(/(\d{1,2})[\s]*[x\/][\s]*(\d{1,2})/);
       let parcelas: number | undefined = undefined;
       let parcelaAtual: number | undefined = undefined;
       let emAndamento: boolean | undefined = undefined;
@@ -314,6 +347,14 @@ function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<
         parcelas = parseInt(parcelamentoMatch[2]);
         emAndamento = true;
       }
+
+      let descricao = lineWithoutDate
+        .replace(valueMatch[0], "")
+        .replace(parcelamentoMatch ? parcelamentoMatch[0] : "", "")
+        .replace(/R\$/g, "")
+        .trim();
+
+      if (!descricao) descricao = "Compra Importada";
 
       results.push({
         descricao,
@@ -326,8 +367,13 @@ function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<
         emAndamento,
         ativo: true
       });
+      continue;
     }
+
+    // Se a linha não for data nem valor, ela pode ser a descrição aguardando um valor na linha de baixo
+    lastSeenDesc = line;
   }
+
   return results;
 }
 
@@ -560,13 +606,24 @@ function AppMvp() {
     }));
   };
 
+  // Sincroniza a alteração do cartão selecionado no dropdown com toda a pré-visualização na tela
+  const aoMudarCartaoImportador = (id: string) => {
+    setCartaoImportadorId(id);
+    setImportacoesPrevia(prev => prev.map(item => ({ ...item, cardId: id || undefined })));
+  };
+
   // Executa o parser e carrega as transações identificadas na caixa de pré-visualização
   const rodarParserFatura = () => {
     if (!textoFatura) return;
-    const cardDetectado = detectarCartaoPorTexto(textoFatura, estado.cards) || cartaoImportadorId;
-    setCartaoImportadorId(cardDetectado);
+    
+    // Se o usuário selecionou um cartão manualmente, respeita absoluto. Caso contrário, tenta auto-detectar
+    let cardIdFinal = cartaoImportadorId;
+    if (!cardIdFinal) {
+      cardIdFinal = detectarCartaoPorTexto(textoFatura, estado.cards) || (estado.cards[0]?.id || "");
+      setCartaoImportadorId(cardIdFinal);
+    }
 
-    const resultado = parsePastedInvoiceText(textoFatura, cardDetectado, hoje);
+    const resultado = parsePastedInvoiceText(textoFatura, cardIdFinal, hoje);
     setImportacoesPrevia(resultado.map(item => ({ ...item, tempId: uid(), selecionado: true })));
   };
 
@@ -659,29 +716,33 @@ function AppMvp() {
       </Bloco>
 
       <Bloco titulo="2. Contas fixas">
-        <ul className="divide-y divide-border">
-          {estado.fixas.map((f) => idEditandoFixa === f.id ? (
-            <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="Nome"><input value={editFixaNome} onChange={(e) => setEditFixaNome(e.target.value)} className={inputCls} /></Field>
-                <Field label="Valor"><input type="text" value={formatarMoedaInput(editFixaValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditFixaValor(Number(d) / 100); }} className={inputCls} /></Field>
-                <Field label="Vencimento"><input type="date" value={editFixaDataVencimento} onChange={(e) => setEditFixaDataVencimento(e.target.value)} className={inputCls} /></Field>
-              </div>
-              <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoFixa(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoFixa} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
-            </li>
-          ) : (
-            <li key={f.id} className="flex items-center justify-between py-3">
-              <div className="flex-1 flex items-center justify-between gap-4">
-                <div>
-                  <p className="font-medium">{f.nome}</p>
-                  <p className="text-xs text-muted-foreground">Próximo vencimento: {obterProximoVencimentoExato(f, hoje).toLocaleDateString("pt-BR")}</p>
+        {estado.fixas.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhuma conta fixa cadastrada.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {estado.fixas.map((f) => idEditandoFixa === f.id ? (
+              <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Field label="Nome"><input value={editFixaNome} onChange={(e) => setEditFixaNome(e.target.value)} className={inputCls} /></Field>
+                  <Field label="Valor"><input type="text" value={formatarMoedaInput(editFixaValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditFixaValor(Number(d) / 100); }} className={inputCls} /></Field>
+                  <Field label="Vencimento"><input type="date" value={editFixaDataVencimento} onChange={(e) => setEditFixaDataVencimento(e.target.value)} className={inputCls} /></Field>
                 </div>
-                <p className="font-semibold">{brl(f.valor)}</p>
-              </div>
-              <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoFixa(f)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, fixas: s.fixas.filter(x => x.id !== f.id) }))} className="text-xs text-destructive underline">remover</button></div>
-            </li>
-          ))}
-        </ul>
+                <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoFixa(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoFixa} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
+              </li>
+            ) : (
+              <li key={f.id} className="flex items-center justify-between py-3">
+                <div className="flex-1 flex items-center justify-between gap-4">
+                  <div>
+                    <p className="font-medium">{f.nome}</p>
+                    <p className="text-xs text-muted-foreground">Próximo vencimento: {obterProximoVencimentoExato(f, hoje).toLocaleDateString("pt-BR")}</p>
+                  </div>
+                  <p className="font-semibold">{brl(f.valor)}</p>
+                </div>
+                <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoFixa(f)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, fixas: s.fixas.filter(x => x.id !== f.id) }))} className="text-xs text-destructive underline">remover</button></div>
+              </li>
+            ))}
+          </ul>
+        )}
         <FormFixa onAdd={(f) => setEstado((s) => ({ ...s, fixas: [...s.fixas, { ...f, id: uid() }] }))} />
       </Bloco>
 
@@ -707,7 +768,6 @@ function AppMvp() {
         <FormCard onAdd={(c) => setEstado((s) => ({ ...s, cards: [...s.cards, { ...c, id: uid() }] }))} />
       </Bloco>
 
-      {/* LANÇAMENTOS COM EDIÇÃO INLINE */}
       <Bloco titulo="4. Lançamentos">
         {/* BOTÃO DO IMPORTADOR INTELIGENTE (🪄 COPIA-E-COLA) */}
         <div className="mb-4">
@@ -728,7 +788,7 @@ function AppMvp() {
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Cartão de Destino">
-                <select value={cartaoImportadorId} onChange={(e) => setCartaoImportadorId(e.target.value)} className={inputCls}>
+                <select value={cartaoImportadorId} onChange={(e) => aoMudarCartaoImportador(e.target.value)} className={inputCls}>
                   <option value="">Selecione um cartão...</option>
                   {estado.cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}
                 </select>
@@ -914,5 +974,5 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
 function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento, "id">) => void }) {
   const [descricao, setDescricao] = useState(""); const [valor, setValor] = useState<number>(0); const [tipo, setTipo] = useState<TipoLanc>("debito"); const [cardId, setCardId] = useState(""); const [parcelas, setParcelas] = useState("2"); const [data, setData] = useState(new Date().toISOString().slice(0, 10)); const [terceiro, setTerceiro] = useState(false); const [emAndamento, setEmAndamento] = useState(false); const [parcelaAtual, setParcelaAtual] = useState("2");
   const ehCredito = tipo.includes("credito") || tipo === "estorno"; const ehParcelado = tipo === "credito_parcelado";
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_ सविता" value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
 }
