@@ -6,7 +6,8 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 
 
-/**import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+/*
+import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
   tanstackStart: {
@@ -15,17 +16,20 @@ export default defineConfig({
     server: { entry: "server" },
   },
 });
-*//
+*/
 
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react' // or vue, svelte, etc.
+import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
-// https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
-  server: {
-    allowedHosts: [
-      'appfinance-cbsg.onrender.com'
-    ]
+  tanstackStart: {
+    // Redireciona o entry point do servidor do TanStack Start para src/server.ts
+    server: { entry: "server" },
+  },
+  vite: {
+    server: {
+      allowedHosts: [
+        'appfinance-cbsg.onrender.com'
+      ]
+    }
   }
-})
+});
