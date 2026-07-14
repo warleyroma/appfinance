@@ -1,3 +1,6 @@
+================================================
+FILE: src/routes/app.tsx
+================================================
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -37,7 +40,7 @@ type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno";
 type Lancamento = {
   id: string;
   descricao: string;
-  valor: number; 
+  valor: number; // Para compras novas: valor total. Para em andamento: valor da parcela unitária.
   data: string; // ISO yyyy-mm-dd
   tipo: TipoLanc;
   cardId?: string;
@@ -49,16 +52,15 @@ type Lancamento = {
   terceiroNome?: string;
 };
 
-type ModoSalario = "dia_fixo" | "dia_util";
-
 type Estado = {
   salario: number;
   ticketTransporte?: number;
+  temAdiantamento?: boolean; // Define se possui adiantamento
   adiantamento?: number;
-  diaAdiantamento?: number;
-  modoSalario: ModoSalario;
-  diaSalario: number; 
-  diaUtilSalario: number; 
+  dataUltimoSalario?: string; // Data real preenchida pelo usuário
+  dataProximoSalario?: string; // Data estimada preenchida pelo usuário
+  dataUltimoAdiantamento?: string; // Data real do adiantamento
+  dataProximoAdiantamento?: string; // Data estimada do adiantamento
   fixas: Fixa[];
   cards: Card[];
   lancamentos: Lancamento[];
@@ -66,14 +68,24 @@ type Estado = {
 
 const STORAGE_KEY = "qpg.mvp.v2";
 
+// Retorna uma data padrão segura baseada na data atual do sistema para preenchimento intuitivo
+const obterDataPadrao = (dia: number, offsetMes: number) => {
+  const d = new Date();
+  d.setDate(dia);
+  d.setHours(0, 0, 0, 0);
+  d.setMonth(d.getMonth() + offsetMes);
+  return d.toISOString().slice(0, 10);
+};
+
 const estadoInicial: Estado = {
   salario: 0,
   ticketTransporte: 0,
+  temAdiantamento: false, // Desmarcado por padrão
   adiantamento: 0,
-  diaAdiantamento: 15,
-  modoSalario: "dia_fixo",
-  diaSalario: 5,
-  diaUtilSalario: 5,
+  dataUltimoSalario: obterDataPadrao(5, 0),
+  dataProximoSalario: obterDataPadrao(5, 1),
+  dataUltimoAdiantamento: obterDataPadrao(15, 0),
+  dataProximoAdiantamento: obterDataPadrao(15, 1),
   fixas: [],
   cards: [],
   lancamentos: [],
@@ -83,6 +95,7 @@ const estadoInicial: Estado = {
 const brl = (n: number) =>
   n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
+// Máscara de digitação automática estilo aplicativo de banco (centavos automáticos)
 function formatarMoedaInput(value: number | string | undefined): string {
   if (value === undefined || value === null || value === 0 || value === "") {
     return "0,00";
@@ -95,6 +108,7 @@ function formatarMoedaInput(value: number | string | undefined): string {
   });
 }
 
+// Converte string de data ISO "yyyy-mm-dd" estritamente no fuso horário local do computador
 function parseLocalDate(dateStr: string): Date {
   const parts = dateStr.split("-").map(Number);
   if (parts.length !== 3 || parts.some(isNaN)) {
@@ -105,24 +119,6 @@ function parseLocalDate(dateStr: string): Date {
 }
 
 const uid = () => Math.random().toString(36).slice(2, 10);
-
-function ehDiaUtil(d: Date) {
-  const dow = d.getDay();
-  return dow !== 0 && dow !== 6;
-}
-
-function nthDiaUtil(ano: number, mes: number, n: number) {
-  const d = new Date(ano, mes, 1);
-  let count = 0;
-  while (d.getMonth() === mes) {
-    if (ehDiaUtil(d)) {
-      count++;
-      if (count === n) return new Date(d);
-    }
-    d.setDate(d.getDate() + 1);
-  }
-  return new Date(ano, mes + 1, 0);
-}
 
 function proximaData(diaAlvo: number, base: Date) {
   const d = new Date(base);
@@ -137,29 +133,6 @@ function proximaData(diaAlvo: number, base: Date) {
     alvo = new Date(ano, mes + 1, Math.min(diaAlvo, ultimoProx));
   }
   return alvo;
-}
-
-function obterUltimaData(diaAlvo: number, base: Date) {
-  const d = new Date(base);
-  d.setHours(0, 0, 0, 0);
-  const ano = d.getFullYear();
-  const mes = d.getMonth();
-  const ultimoDia = new Date(ano, mes + 1, 0).getDate();
-  const dia = Math.min(diaAlvo, ultimoDia);
-  let alvo = new Date(ano, mes, dia);
-  if (alvo > d) {
-    const ultimoAnterior = new Date(ano, mes, 0).getDate();
-    alvo = new Date(ano, mes - 1, Math.min(diaAlvo, ultimoAnterior));
-  }
-  return alvo;
-}
-
-function proximoDiaUtilSalario(n: number, base: Date) {
-  const d = new Date(base);
-  d.setHours(0, 0, 0, 0);
-  const atual = nthDiaUtil(d.getFullYear(), d.getMonth(), n);
-  if (atual >= d) return atual;
-  return nthDiaUtil(d.getFullYear(), d.getMonth() + 1, n);
 }
 
 function diasEntre(a: Date, b: Date) {
@@ -184,7 +157,6 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
   return lancs
     .filter((l) => l.cardId === card.id && (considerarTerceiros || !l.terceiro))
     .reduce((total, l) => {
-      // CORREÇÃO DE DATA: Se a compra está em andamento, ancoramos os meses que passaram à data de registro da parcela atual
       const compDate = parseLocalDate(l.emAndamento ? (l.dataRegistro || l.data) : l.data);
 
       if (l.tipo === "credito_avista") {
@@ -237,10 +209,12 @@ function obterLabelParcela(l: Lancamento, card?: Card, hoje?: Date) {
   return `finalizada (${l.parcelas}x)`;
 }
 
+// ---------- Componente ----------
 function AppMvp() {
   const [estado, setEstado] = useState<Estado>(estadoInicial);
   const [hidratado, setHidratado] = useState(false);
 
+  // Estados para Controle de Edição de Lançamentos
   const [idEditando, setIdEditando] = useState<string | null>(null);
   const [editDescricao, setEditDescricao] = useState("");
   const [editValor, setEditValor] = useState<number>(0);
@@ -253,11 +227,13 @@ function AppMvp() {
   const [editTerceiro, setEditTerceiro] = useState(false);
   const [editTerceiroNome, setEditTerceiroNome] = useState("");
 
+  // Estados para Controle de Edição de Contas Fixas
   const [idEditandoFixa, setIdEditandoFixa] = useState<string | null>(null);
   const [editFixaNome, setEditFixaNome] = useState("");
   const [editFixaValor, setEditFixaValor] = useState<number>(0);
   const [editFixaDia, setEditFixaDia] = useState(10);
 
+  // Estados para Controle de Edição de Cartões de Crédito
   const [idEditandoCard, setIdEditandoCard] = useState<string | null>(null);
   const [editCardNome, setEditCardNome] = useState("");
   const [editCardLimite, setEditCardLimite] = useState<number>(0);
@@ -289,26 +265,40 @@ function AppMvp() {
   }, []);
 
   const calculo = useMemo(() => {
-    const proxPagamentoPrincipal = estado.modoSalario === "dia_util" ? proximoDiaUtilSalario(estado.diaUtilSalario, hoje) : proximaData(estado.diaSalario, hoje);
-    const temAdiantamento = (estado.adiantamento || 0) > 0;
-    const proxAdiantamento = temAdiantamento ? proximaData(estado.diaAdiantamento || 15, hoje) : null;
-    const proxSalario = proxAdiantamento && proxAdiantamento < proxPagamentoPrincipal ? proxAdiantamento : proxPagamentoPrincipal;
+    // 1. CARREGAMENTO E ROLAGEM DE CICLO AUTOMÁTICO: Evita ter que redigitar as datas no próximo mês
+    let ultimoPagamento = parseLocalDate(estado.dataUltimoSalario || obterDataPadrao(5, 0));
+    let proximoPagamento = parseLocalDate(estado.dataProximoSalario || obterDataPadrao(5, 1));
+    
+    while (hoje >= proximoPagamento) {
+      ultimoPagamento = new Date(proximoPagamento);
+      proximoPagamento = new Date(proximoPagamento);
+      proximoPagamento.setMonth(proximoPagamento.getMonth() + 1);
+    }
+
+    const temAdiantamento = !!estado.temAdiantamento;
+    let ultimoAdiantamento = temAdiantamento ? parseLocalDate(estado.dataUltimoAdiantamento || obterDataPadrao(15, 0)) : null;
+    let proximoAdiantamento = temAdiantamento ? parseLocalDate(estado.dataProximoAdiantamento || obterDataPadrao(15, 1)) : null;
+
+    if (temAdiantamento && ultimoAdiantamento && proximoAdiantamento) {
+      while (hoje >= proximoAdiantamento) {
+        ultimoAdiantamento = new Date(proximoAdiantamento);
+        proximoAdiantamento = new Date(proximoAdiantamento);
+        proximoAdiantamento.setMonth(proximoAdiantamento.getMonth() + 1);
+      }
+    }
+
+    // 2. Define os limites reais do ciclo ativo corrente
+    const proxSalario = temAdiantamento && proximoAdiantamento && proximoAdiantamento < proximoPagamento
+      ? proximoAdiantamento
+      : proximoPagamento;
+
+    const inicioCiclo = temAdiantamento && ultimoAdiantamento && ultimoAdiantamento > ultimoPagamento
+      ? ultimoAdiantamento
+      : ultimoPagamento;
+
     const diasAte = diasEntre(hoje, proxSalario);
 
-    const ultimoPagamentoPrincipal = (() => {
-      if (estado.modoSalario === "dia_util") {
-        const dPrincipalNoMes = nthDiaUtil(hoje.getFullYear(), hoje.getMonth(), estado.diaUtilSalario);
-        if (dPrincipalNoMes > hoje) {
-          const anoAnterior = hoje.getMonth() === 0 ? hoje.getFullYear() - 1 : hoje.getFullYear();
-          const mesAnterior = hoje.getMonth() === 0 ? 11 : hoje.getMonth() - 1;
-          return nthDiaUtil(anoAnterior, mesAnterior, estado.diaUtilSalario);
-        }
-        return dPrincipalNoMes;
-      } else return obterUltimaData(estado.diaSalario, hoje);
-    })();
-    const ultimoAdiantamento = temAdiantamento ? obterUltimaData(estado.diaAdiantamento || 15, hoje) : null;
-    const inicioCiclo = temAdiantamento && ultimoAdiantamento && ultimoAdiantamento > ultimoPagamentoPrincipal ? ultimoAdiantamento : ultimoPagamentoPrincipal;
-
+    // 3. Mapeia contas fixas que vencem estritamente dentro deste subciclo ativo
     const fixasFuturas = estado.fixas.reduce((s, f) => {
       const venc = proximaData(f.diaVencimento, hoje);
       return venc < proxSalario ? s + f.valor : s;
@@ -322,7 +312,7 @@ function AppMvp() {
         return d >= inicioCiclo && d <= hoje;
       })
       .reduce((s, l) => {
-        if (l.tipo === "estorno") return s - l.valor; // Estorno no débito deduz dos gastos (devolve saldo)
+        if (l.tipo === "estorno") return s - l.valor; 
         return s + l.valor;
       }, 0);
 
@@ -331,20 +321,48 @@ function AppMvp() {
       return vencRef < proxSalario ? s + calcularFatura(c, estado.lancamentos, vencRef, false) : s;
     }, 0);
 
-    const rendaCicloAtivo = temAdiantamento && proxSalario === proxPagamentoPrincipal ? (estado.adiantamento || 0) : estado.salario + (estado.ticketTransporte || 0);
+    const gastosTerceiros = estado.lancamentos
+      .filter((l) => l.terceiro)
+      .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
+
+    // Renda Ativa que está financiando este ciclo atual
+    const rendaCicloAtivo = temAdiantamento && proxSalario === proximoPagamento
+      ? (estado.adiantamento || 0)
+      : estado.salario + (estado.ticketTransporte || 0);
+
     const disponivelCiclo = Math.max(0, rendaCicloAtivo - fixasFuturas - debitoCiclo - faturas);
     const porDia = disponivelCiclo / diasAte;
 
-    const fimProximoCiclo = !temAdiantamento ? proxSalario : (proxSalario === proxAdiantamento ? proxPagamentoPrincipal : proximaData(estado.diaAdiantamento || 15, proxPagamentoPrincipal));
-    const diasProximoCiclo = temAdiantamento ? diasEntre(proxSalario, fimProximoCiclo) : 1;
-    const rendaProximoCiclo = temAdiantamento ? (proxSalario === proxAdiantamento ? (estado.adiantamento || 0) : estado.salario + (estado.ticketTransporte || 0)) : rendaCicloAtivo;
+    const rendaMensalTotal = estado.salario + (estado.ticketTransporte || 0) + (estado.adiantamento || 0);
+
+    // --- CÁLCULO DA PROJEÇÃO DO PRÓXIMO CICLO (A ESPIADA) ---
+    const temProximoCiclo = temAdiantamento;
+    
+    const fimProximoCiclo = (() => {
+      if (!temProximoCiclo) return proxSalario;
+      if (proxSalario === proximoAdiantamento) {
+        return proximoPagamento;
+      } else {
+        return proximaData(estado.diaAdiantamento || 15, proximoPagamento);
+      }
+    })();
+
+    const diasProximoCiclo = temProximoCiclo ? diasEntre(proxSalario, fimProximoCiclo) : 1;
+
+    const rendaProximoCiclo = temProximoCiclo
+      ? (proxSalario === proximoAdiantamento
+          ? (estado.adiantamento || 0)
+          : estado.salario + (estado.ticketTransporte || 0))
+      : rendaCicloAtivo;
+
     const fixasProximoCiclo = estado.fixas.reduce((s, f) => {
-      if (!temAdiantamento) return 0;
+      if (!temProximoCiclo) return 0;
       const venc = proximaData(f.diaVencimento, proxSalario);
       return venc >= proxSalario && venc < fimProximoCiclo ? s + f.valor : s;
     }, 0);
+
     const faturasProximoCiclo = estado.cards.reduce((s, c) => {
-      if (!temAdiantamento) return 0;
+      if (!temProximoCiclo) return 0;
       const vencRef = proximaData(c.vencimento, proxSalario);
       return (vencRef >= proxSalario && vencRef < fimProximoCiclo) ? s + calcularFatura(c, estado.lancamentos, vencRef, false) : s;
     }, 0);
@@ -355,8 +373,8 @@ function AppMvp() {
     return { 
       proxSalario, diasAte, fixasFuturas, debitoCiclo, faturas, 
       disponivelCiclo, porDia, rendaTotal: rendaCicloAtivo, 
-      rendaMensalTotal: estado.salario + (estado.ticketTransporte || 0) + (estado.adiantamento || 0),
-      temProximoCiclo: temAdiantamento, fimProximoCiclo, diasProximoCiclo, disponivelProximoCiclo, porDiaProximoCiclo 
+      rendaMensalTotal,
+      temProximoCiclo, fimProximoCiclo, diasProximoCiclo, disponivelProximoCiclo, porDiaProximoCiclo 
     };
   }, [estado, hoje]);
 
@@ -397,27 +415,41 @@ function AppMvp() {
 
       <Bloco titulo="1. Renda e ciclo">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Salário líquido restante">
+          <Field label="Salário líquido restante (R$)">
             <input type="text" value={formatarMoedaInput(estado.salario)} onChange={(e) => { const digits = e.target.value.replace(/\D/g, ""); setEstado((s) => ({ ...s, salario: Number(digits) / 100 })); }} className={inputCls} />
           </Field>
-          <Field label="Ticket Transporte / VT">
+          <Field label="Ticket Transporte / VT (R$)">
             <input type="text" value={formatarMoedaInput(estado.ticketTransporte)} onChange={(e) => { const digits = e.target.value.replace(/\D/g, ""); setEstado((s) => ({ ...s, ticketTransporte: Number(digits) / 100 })); }} className={inputCls} />
           </Field>
-          <Field label="Adiantamento / Quinzena">
-            <input type="text" value={formatarMoedaInput(estado.adiantamento)} onChange={(e) => { const digits = e.target.value.replace(/\D/g, ""); setEstado((s) => ({ ...s, adiantamento: Number(digits) / 100 })); }} className={inputCls} />
+          
+          <Field label="Data do último salário recebido">
+            <input type="date" value={estado.dataUltimoSalario || obterDataPadrao(5, 0)} onChange={(e) => setEstado((s) => ({ ...s, dataUltimoSalario: e.target.value }))} className={inputCls} />
           </Field>
-          <Field label="Dia do adiantamento">
-            <input type="number" min={1} max={31} value={estado.diaAdiantamento} onChange={(e) => setEstado((s) => ({ ...s, diaAdiantamento: Number(e.target.value) || 15 }))} className={inputCls} />
+          <Field label="Data estimada do próximo salário">
+            <input type="date" value={estado.dataProximoSalario || obterDataPadrao(5, 1)} onChange={(e) => setEstado((s) => ({ ...s, dataProximoSalario: e.target.value }))} className={inputCls} />
           </Field>
-          <Field label="Recebimento do salário">
-            <select value={estado.modoSalario} onChange={(e) => setEstado((s) => ({ ...s, modoSalario: e.target.value as ModoSalario }))} className={inputCls}>
-              <option value="dia_fixo">Dia fixo do mês</option>
-              <option value="dia_util">Dia útil</option>
-            </select>
-          </Field>
-          <Field label={estado.modoSalario === "dia_fixo" ? "Dia do recebimento" : "Qual dia útil?"}>
-            <input type="number" value={estado.modoSalario === "dia_fixo" ? estado.diaSalario : estado.diaUtilSalario} onChange={(e) => setEstado((s) => ({ ...s, [estado.modoSalario === "dia_fixo" ? "diaSalario" : "diaUtilSalario"]: Number(e.target.value) || 1 }))} className={inputCls} />
-          </Field>
+
+          <div className="sm:col-span-2 flex items-center gap-2 py-2">
+            <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer font-medium">
+              <input type="checkbox" checked={!!estado.temAdiantamento} onChange={(e) => setEstado((s) => ({ ...s, temAdiantamento: e.target.checked }))} className="h-4 w-4 text-primary focus:ring-primary border-border rounded" />
+              <span>Recebe adiantamento quinzenal (Vale)?</span>
+            </label>
+          </div>
+
+          {estado.temAdiantamento && (
+            <>
+              <Field label="Valor do adiantamento (R$)">
+                <input type="text" value={formatarMoedaInput(estado.adiantamento)} onChange={(e) => { const digits = e.target.value.replace(/\D/g, ""); setEstado((s) => ({ ...s, adiantamento: Number(digits) / 100 })); }} className={inputCls} />
+              </Field>
+              <div className="hidden sm:block"></div> 
+              <Field label="Data do último adiantamento recebido">
+                <input type="date" value={estado.dataUltimoAdiantamento || obterDataPadrao(15, 0)} onChange={(e) => setEstado((s) => ({ ...s, dataUltimoAdiantamento: e.target.value }))} className={inputCls} />
+              </Field>
+              <Field label="Data estimada do próximo adiantamento">
+                <input type="date" value={estado.dataProximoAdiantamento || obterDataPadrao(15, 1)} onChange={(e) => setEstado((s) => ({ ...s, dataProximoAdiantamento: e.target.value }))} className={inputCls} />
+              </Field>
+            </>
+          )}
         </div>
       </Bloco>
 
@@ -475,8 +507,8 @@ function AppMvp() {
                   <select value={editTipo} onChange={(e) => setEditTipo(e.target.value as TipoLanc)} className={inputCls}>
                     <option value="debito">Débito</option>
                     <option value="estorno">Estorno</option>
-                    <option value="credito_avista">Crédito à vista</option>
-                    <option value="credito_parcelado">Crédito parcelado</option>
+                    <option value="credito_avista">À vista</option>
+                    <option value="credito_parcelado">Parcelado</option>
                   </select>
                 </Field>
                 <Field label="Data"><input type="date" value={editData} onChange={(e) => setEditData(e.target.value)} className={inputCls} /></Field>
@@ -498,7 +530,7 @@ function AppMvp() {
                 <div>
                   <p className="font-medium">
                     {l.descricao}
-                    {l.terceiro && <span className="ml-2 text-[10px] bg-accent/10 px-1 uppercase tracking-wider text-accent">terceiro</span>}
+                    {l.terceiro && <span className="ml-2 text-[10px] bg-accent/10 px-1 uppercase tracking-wider text-accent font-semibold">terceiro</span>}
                   </p>
                   <p className="text-xs text-muted-foreground">
                     {parseLocalDate(l.data).toLocaleDateString("pt-BR")} · {
