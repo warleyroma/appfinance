@@ -78,9 +78,22 @@ const estadoInicial: Estado = {
   lancamentos: [],
 };
 
-// ---------- Utilidades ----------
+// ---------- Utilidades de Formatação ----------
 const brl = (n: number) =>
   n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+// Máscara de digitação automática estilo aplicativo de banco (centavos automáticos)
+function formatarMoedaInput(value: number | string | undefined): string {
+  if (value === undefined || value === null || value === 0 || value === "") {
+    return "0,00";
+  }
+  const num = typeof value === "string" ? parseFloat(value.replace(",", ".")) : value;
+  if (isNaN(num)) return "0,00";
+  return num.toLocaleString("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -136,7 +149,6 @@ function obterFechamentoParaVencimento(vencDate: Date, fechDay: number, vencDay:
   const d = new Date(vencDate);
   d.setHours(0, 0, 0, 0);
   if (fechDay >= vencDay) {
-    // O fechamento ocorreu no mês anterior ao vencimento da fatura
     d.setMonth(d.getMonth() - 1);
   }
   const ultimoDia = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
@@ -154,7 +166,6 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
       const compDate = new Date(l.data);
       compDate.setHours(0, 0, 0, 0);
 
-      // 1. Caso: Crédito à vista
       if (l.tipo === "credito_avista") {
         const fechAnterior = new Date(fechRef);
         fechAnterior.setMonth(fechAnterior.getMonth() - 1);
@@ -165,7 +176,6 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
         return total;
       }
 
-      // 2. Caso: Crédito parcelado (Novo ou Em Andamento)
       if (l.tipo === "credito_parcelado") {
         const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
         let fechCompra = fechNoMes;
@@ -176,13 +186,11 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
         const diffMeses = (fechRef.getFullYear() - fechCompra.getFullYear()) * 12 + (fechRef.getMonth() - fechCompra.getMonth());
 
         if (l.emAndamento) {
-          // Compra em andamento: valor inserido já é unitário da parcela
           const parcelaAtualNoCiclo = (l.parcelaAtual || 1) + diffMeses;
           if (parcelaAtualNoCiclo > 0 && parcelaAtualNoCiclo <= (l.parcelas || 1)) {
             return total + l.valor;
           }
         } else {
-          // Compra nova: divide o valor total pelas parcelas
           if (diffMeses >= 0 && diffMeses < (l.parcelas || 1)) {
             return total + (l.valor / (l.parcelas || 1));
           }
@@ -193,7 +201,6 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
     }, 0);
 }
 
-// Retorna uma string descritiva amigável do andamento de uma parcela (ex: "parcela 2/3")
 function obterLabelParcela(l: Lancamento, card?: Card, hoje?: Date) {
   if (l.tipo !== "credito_parcelado") return "";
   if (!card || !hoje) return `${l.parcelas}x`;
@@ -228,6 +235,19 @@ function AppMvp() {
   const [estado, setEstado] = useState<Estado>(estadoInicial);
   const [hidratado, setHidratado] = useState(false);
 
+  // Estados para Controle de Edição de Lançamentos
+  const [idEditando, setIdEditando] = useState<string | null>(null);
+  const [editDescricao, setEditDescricao] = useState("");
+  const [editValor, setEditValor] = useState<number>(0);
+  const [editTipo, setEditTipo] = useState<TipoLanc>("debito");
+  const [editCardId, setEditCardId] = useState("");
+  const [editParcelas, setEditParcelas] = useState(2);
+  const [editParcelaAtual, setEditParcelaAtual] = useState(2);
+  const [editEmAndamento, setEditEmAndamento] = useState(false);
+  const [editData, setEditData] = useState("");
+  const [editTerceiro, setEditTerceiro] = useState(false);
+  const [editTerceiroNome, setEditTerceiroNome] = useState("");
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -249,29 +269,26 @@ function AppMvp() {
   }, []);
 
   const calculo = useMemo(() => {
-    // 1. Calcula o próximo pagamento principal (salário)
     const proxPagamentoPrincipal =
       estado.modoSalario === "dia_util"
         ? proximoDiaUtilSalario(estado.diaUtilSalario, hoje)
         : proximaData(estado.diaSalario, hoje);
 
-    // 2. Calcula o próximo adiantamento (caso exista)
     const temAdiantamento = (estado.adiantamento || 0) > 0;
     const proxAdiantamento = temAdiantamento
       ? proximaData(estado.diaAdiantamento || 15, hoje)
       : null;
 
-    // 3. O fechamento do ciclo atual de gastos será na data de recebimento mais próxima
     const proxSalario = proxAdiantamento && proxAdiantamento < proxPagamentoPrincipal
       ? proxAdiantamento
       : proxPagamentoPrincipal;
 
     const diasAte = diasEntre(hoje, proxSalario);
 
-    // 4. Mapeia contas fixas que vencem estritamente dentro deste subciclo ativo
+    // CORREÇÃO DE LÓGICA: Contas que vencem estritamente ANTES da nova renda entrar (venc < proxSalario)
     const fixasFuturas = estado.fixas.reduce((s, f) => {
       const venc = proximaData(f.diaVencimento, hoje);
-      return venc <= proxSalario ? s + f.valor : s;
+      return venc < proxSalario ? s + f.valor : s;
     }, 0);
 
     const debitoCiclo = estado.lancamentos
@@ -282,7 +299,6 @@ function AppMvp() {
       })
       .reduce((s, l) => s + l.valor, 0);
 
-    // Faturas ativas do ciclo corrente (deduzidas hoje)
     const faturas = estado.cards.reduce(
       (s, c) => s + calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, hoje), false),
       0,
@@ -292,7 +308,6 @@ function AppMvp() {
       .filter((l) => l.terceiro)
       .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
 
-    // 5. Define qual é a Renda Ativa que está financiando este ciclo atual
     const rendaCicloAtivo = temAdiantamento && proxSalario === proxPagamentoPrincipal
       ? (estado.adiantamento || 0)
       : estado.salario + (estado.ticketTransporte || 0);
@@ -303,10 +318,9 @@ function AppMvp() {
     );
     const porDia = disponivelCiclo / diasAte;
 
-    // Apenas informativo: soma mensal de todas as receitas
     const rendaMensalTotal = estado.salario + (estado.ticketTransporte || 0) + (estado.adiantamento || 0);
 
-    // 6. --- CÁLCULO DA PROJEÇÃO DO PRÓXIMO CICLO (A ESPIADA) ---
+    // --- CÁLCULO DA PROJEÇÃO DO PRÓXIMO CICLO (A ESPIADA) ---
     const temProximoCiclo = temAdiantamento;
     
     const fimProximoCiclo = (() => {
@@ -326,13 +340,13 @@ function AppMvp() {
           : estado.salario + (estado.ticketTransporte || 0))
       : rendaCicloAtivo;
 
+    // CORREÇÃO DE LÓGICA: Contas do próximo ciclo de forma rigorosa (venc >= proxSalario && venc < fimProximoCiclo)
     const fixasProximoCiclo = estado.fixas.reduce((s, f) => {
       if (!temProximoCiclo) return 0;
       const venc = proximaData(f.diaVencimento, proxSalario);
-      return venc > proxSalario && venc <= fimProximoCiclo ? s + f.valor : s;
+      return venc >= proxSalario && venc < fimProximoCiclo ? s + f.valor : s;
     }, 0);
 
-    // Faturas previstas para vencer estritamente no próximo ciclo (essencial para a espiada precisa!)
     const faturasProximoCiclo = estado.cards.reduce(
       (s, c) => s + calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, proxSalario), false),
       0,
@@ -352,7 +366,6 @@ function AppMvp() {
       porDia,
       rendaTotal: rendaCicloAtivo,
       rendaMensalTotal,
-      // Dados de projeção para a "Espiada":
       temProximoCiclo,
       fimProximoCiclo,
       diasProximoCiclo,
@@ -360,6 +373,46 @@ function AppMvp() {
       porDiaProximoCiclo,
     };
   }, [estado, hoje]);
+
+  // Função para Inicializar o Editor Inline de um Lançamento
+  const iniciarEdicao = (l: Lancamento) => {
+    setIdEditando(l.id);
+    setEditDescricao(l.descricao);
+    setEditValor(l.valor);
+    setEditTipo(l.tipo);
+    setEditCardId(l.cardId || "");
+    setEditParcelas(l.parcelas || 2);
+    setEditParcelaAtual(l.parcelaAtual || 2);
+    setEditEmAndamento(!!l.emAndamento);
+    setEditData(l.data);
+    setEditTerceiro(!!l.terceiro);
+    setEditTerceiroNome(l.terceiroNome || "");
+  };
+
+  // Função para Salvar a Edição Inline de um Lançamento
+  const salvarEdicao = () => {
+    setEstado((s) => ({
+      ...s,
+      lancamentos: s.lancamentos.map((l) =>
+        l.id === idEditando
+          ? {
+              ...l,
+              descricao: editDescricao,
+              valor: editValor,
+              tipo: editTipo,
+              cardId: (editTipo === "credito_avista" || editTipo === "credito_parcelado") ? editCardId : undefined,
+              parcelas: editTipo === "credito_parcelado" ? editParcelas : undefined,
+              parcelaAtual: (editTipo === "credito_parcelado" && editEmAndamento) ? editParcelaAtual : undefined,
+              emAndamento: (editTipo === "credito_parcelado" && editEmAndamento) ? true : undefined,
+              data: editData,
+              terceiro: editTerceiro || undefined,
+              terceiroNome: editTerceiro && editTerceiroNome ? editTerceiroNome : undefined,
+            }
+          : l
+      ),
+    }));
+    setIdEditando(null);
+  };
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-14">
@@ -425,35 +478,35 @@ function AppMvp() {
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Salário líquido restante (R$)">
             <input
-              type="number"
-              value={estado.salario || ""}
-              onChange={(e) =>
-                setEstado((s) => ({ ...s, salario: Number(e.target.value) || 0 }))
-              }
+              type="text"
+              value={formatarMoedaInput(estado.salario)}
+              onChange={(e) => {
+                const digits = e.target.value.replace(/\D/g, "");
+                setEstado((s) => ({ ...s, salario: Number(digits) / 100 }));
+              }}
               className={inputCls}
-              placeholder="Ex.: R$ 3.000"
             />
           </Field>
           <Field label="Ticket Transporte / VT (R$)">
             <input
-              type="number"
-              value={estado.ticketTransporte || ""}
-              onChange={(e) =>
-                setEstado((s) => ({ ...s, ticketTransporte: Number(e.target.value) || 0 }))
-              }
+              type="text"
+              value={formatarMoedaInput(estado.ticketTransporte)}
+              onChange={(e) => {
+                const digits = e.target.value.replace(/\D/g, "");
+                setEstado((s) => ({ ...s, ticketTransporte: Number(digits) / 100 }));
+              }}
               className={inputCls}
-              placeholder="Ex.: R$ 500"
             />
           </Field>
           <Field label="Adiantamento / Vale / Quinzena (R$)">
             <input
-              type="number"
-              value={estado.adiantamento || ""}
-              onChange={(e) =>
-                setEstado((s) => ({ ...s, adiantamento: Number(e.target.value) || 0 }))
-              }
+              type="text"
+              value={formatarMoedaInput(estado.adiantamento)}
+              onChange={(e) => {
+                const digits = e.target.value.replace(/\D/g, "");
+                setEstado((s) => ({ ...s, adiantamento: Number(digits) / 100 }));
+              }}
               className={inputCls}
-              placeholder="Ex.: R$ 2.000"
             />
           </Field>
           <Field label="Dia do adiantamento">
@@ -594,46 +647,218 @@ function AppMvp() {
         />
       </Bloco>
 
-      {/* LANÇAMENTOS */}
+      {/* LANÇAMENTOS COM EDIÇÃO INLINE */}
       <Bloco titulo="4. Lançamentos">
-        <Lista
-          items={[...estado.lancamentos].sort((a, b) => (a.data < b.data ? 1 : -1))}
-          empty="Nenhum lançamento ainda."
-          render={(l) => {
-            const c = estado.cards.find((x) => x.id === l.cardId);
-            const labelParcelamento = obterLabelParcela(l, c, hoje);
-            const tipoLabel =
-              l.tipo === "debito"
-                ? "débito"
-                : l.tipo === "credito_avista"
-                  ? `${c?.nome ?? "cartão"} · à vista`
-                  : `${c?.nome ?? "cartão"} · ${labelParcelamento}`;
-            return (
-              <>
-                <div>
-                  <p className="text-foreground">
-                    {l.descricao}
-                    {l.terceiro && (
-                      <span className="ml-2 rounded bg-accent/15 px-2 py-0.5 text-[10px] uppercase tracking-wider text-accent">
-                        terceiro{l.terceiroNome ? ` · ${l.terceiroNome}` : ""}
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {new Date(l.data).toLocaleDateString("pt-BR")} · {tipoLabel}
-                  </p>
-                </div>
-                <p className={`text-foreground ${l.terceiro ? "opacity-60" : ""}`}>{brl(l.valor)}</p>
-              </>
-            );
-          }}
-          onRemove={(id) =>
-            setEstado((s) => ({
-              ...s,
-              lancamentos: s.lancamentos.filter((x) => x.id !== id),
-            }))
-          }
-        />
+        {[...estado.lancamentos].length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhum lançamento ainda.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {[...estado.lancamentos]
+              .sort((a, b) => (a.data < b.data ? 1 : -1))
+              .map((l) => {
+                const c = estado.cards.find((x) => x.id === l.cardId);
+                const labelParcelamento = obterLabelParcela(l, c, hoje);
+                const tipoLabel =
+                  l.tipo === "debito"
+                    ? "débito"
+                    : l.tipo === "credito_avista"
+                      ? `${c?.nome ?? "cartão"} · à vista`
+                      : `${c?.nome ?? "cartão"} · ${labelParcelamento}`;
+
+                // MODO EDIÇÃO INLINE
+                if (idEditando === l.id) {
+                  const ehCredito = editTipo === "credito_avista" || editTipo === "credito_parcelado";
+                  const ehParcelado = editTipo === "credito_parcelado";
+
+                  return (
+                    <li key={l.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <Field label="Descrição">
+                          <input
+                            value={editDescricao}
+                            onChange={(e) => setEditDescricao(e.target.value)}
+                            className={inputCls}
+                          />
+                        </Field>
+                        <Field label={ehParcelado && editEmAndamento ? "Valor da Parcela" : "Valor"}>
+                          <input
+                            type="text"
+                            value={formatarMoedaInput(editValor)}
+                            onChange={(e) => {
+                              const digits = e.target.value.replace(/\D/g, "");
+                              setEditValor(Number(digits) / 100);
+                            }}
+                            className={inputCls}
+                          />
+                        </Field>
+                        <Field label="Tipo">
+                          <select
+                            value={editTipo}
+                            onChange={(e) => setEditTipo(e.target.value as TipoLanc)}
+                            className={inputCls}
+                          >
+                            <option value="debito">Débito</option>
+                            <option value="credito_avista">Crédito à vista</option>
+                            <option value="credito_parcelado">Crédito parcelado</option>
+                          </select>
+                        </Field>
+                        <Field label="Data">
+                          <input
+                            type="date"
+                            value={editData}
+                            onChange={(e) => setEditData(e.target.value)}
+                            className={inputCls}
+                          />
+                        </Field>
+
+                        {ehCredito && (
+                          <Field label="Cartão">
+                            <select
+                              value={editCardId}
+                              onChange={(e) => setEditCardId(e.target.value)}
+                              className={inputCls}
+                            >
+                              <option value="">Selecione…</option>
+                              {estado.cards.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.nome}
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                        )}
+
+                        {ehParcelado && (
+                          <Field label="Total de Parcelas">
+                            <input
+                              type="number"
+                              min={2}
+                              value={editParcelas}
+                              onChange={(e) => setEditParcelas(Number(e.target.value) || 2)}
+                              className={inputCls}
+                            />
+                          </Field>
+                        )}
+
+                        {ehParcelado && (
+                          <div className="flex items-center gap-2 pt-6">
+                            <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={editEmAndamento}
+                                onChange={(e) => setEditEmAndamento(e.target.checked)}
+                                className="h-4 w-4"
+                              />
+                              <span>Em andamento?</span>
+                            </label>
+                          </div>
+                        )}
+
+                        {ehParcelado && editEmAndamento && (
+                          <Field label="Qual a Parcela Atual?">
+                            <input
+                              type="number"
+                              min={1}
+                              max={editParcelas}
+                              value={editParcelaAtual}
+                              onChange={(e) => setEditParcelaAtual(Number(e.target.value) || 1)}
+                              className={inputCls}
+                            />
+                          </Field>
+                        )}
+
+                        <div className={ehParcelado ? "sm:col-span-2 lg:col-span-4" : "lg:col-span-4"}>
+                          <Field label="Gasto de terceiro?">
+                            <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={editTerceiro}
+                                onChange={(e) => setEditTerceiro(e.target.checked)}
+                                className="h-4 w-4"
+                              />
+                              <span>Não é meu</span>
+                            </label>
+                          </Field>
+                        </div>
+
+                        {editTerceiro && (
+                          <div className="lg:col-span-4">
+                            <Field label="Nome de quem gastou">
+                              <input
+                                value={editTerceiroNome}
+                                onChange={(e) => setEditTerceiroNome(e.target.value)}
+                                className={inputCls}
+                              />
+                            </Field>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex justify-end gap-2 pt-2">
+                        <button
+                          onClick={() => setIdEditando(null)}
+                          className="rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          onClick={salvarEdicao}
+                          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                        >
+                          Salvar Alterações
+                        </button>
+                      </div>
+                    </li>
+                  );
+                }
+
+                // MODO EXIBIÇÃO NORMAL
+                return (
+                  <li key={l.id} className="flex items-center justify-between gap-4 py-3">
+                    <div className="flex-1 flex items-center justify-between gap-4">
+                      <div>
+                        <p className="text-foreground font-medium">
+                          {l.descricao}
+                          {l.terceiro && (
+                            <span className="ml-2 rounded bg-accent/15 px-2 py-0.5 text-[10px] uppercase tracking-wider text-accent font-semibold">
+                              terceiro{l.terceiroNome ? ` · ${l.terceiroNome}` : ""}
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(l.data).toLocaleDateString("pt-BR")} · {tipoLabel}
+                        </p>
+                      </div>
+                      <p className={`text-foreground font-semibold ${l.terceiro ? "opacity-60 font-normal" : ""}`}>
+                        {brl(l.valor)}
+                      </p>
+                    </div>
+                    <div className="flex gap-2.5">
+                      <button
+                        onClick={() => iniciarEdicao(l)}
+                        className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer"
+                        aria-label="Editar"
+                      >
+                        editar
+                      </button>
+                      <button
+                        onClick={() =>
+                          setEstado((s) => ({
+                            ...s,
+                            lancamentos: s.lancamentos.filter((x) => x.id !== l.id),
+                          }))
+                        }
+                        className="text-xs text-muted-foreground hover:text-destructive underline cursor-pointer"
+                        aria-label="Remover"
+                      >
+                        remover
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+          </ul>
+        )}
         <FormLanc
           cards={estado.cards}
           onAdd={(l) =>
@@ -648,7 +873,7 @@ function AppMvp() {
           onClick={() => {
             if (confirm("Zerar todos os dados?")) setEstado(estadoInicial);
           }}
-          className="text-destructive hover:underline"
+          className="text-destructive hover:underline cursor-pointer"
         >
           Zerar dados
         </button>
@@ -713,7 +938,7 @@ function Lista<T extends { id: string }>({
           <div className="flex-1 flex items-center justify-between gap-4">{render(it)}</div>
           <button
             onClick={() => onRemove(it.id)}
-            className="text-xs text-muted-foreground hover:text-destructive"
+            className="text-xs text-muted-foreground hover:text-destructive underline cursor-pointer"
             aria-label="Remover"
           >
             remover
@@ -726,23 +951,32 @@ function Lista<T extends { id: string }>({
 
 function FormFixa({ onAdd }: { onAdd: (f: Omit<Fixa, "id">) => void }) {
   const [nome, setNome] = useState("");
-  const [valor, setValor] = useState("");
+  const [valor, setValor] = useState<number>(0);
   const [dia, setDia] = useState("10");
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
         if (!nome || !valor) return;
-        onAdd({ nome, valor: Number(valor), diaVencimento: Number(dia) });
+        onAdd({ nome, valor, diaVencimento: Number(dia) });
         setNome("");
-        setValor("");
+        setValor(0);
       }}
       className="mt-4 grid gap-3 sm:grid-cols-[1fr_140px_120px_auto]"
     >
       <input placeholder="Ex.: Aluguel" value={nome} onChange={(e) => setNome(e.target.value)} className={inputCls} />
-      <input placeholder="Valor" type="number" value={valor} onChange={(e) => setValor(e.target.value)} className={inputCls} />
+      <input
+        placeholder="Valor"
+        type="text"
+        value={formatarMoedaInput(valor)}
+        onChange={(e) => {
+          const digits = e.target.value.replace(/\D/g, "");
+          setValor(Number(digits) / 100);
+        }}
+        className={inputCls}
+      />
       <input placeholder="Dia" type="number" min={1} max={31} value={dia} onChange={(e) => setDia(e.target.value)} className={inputCls} />
-      <button className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90">
+      <button className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 cursor-pointer">
         Adicionar
       </button>
     </form>
@@ -751,7 +985,7 @@ function FormFixa({ onAdd }: { onAdd: (f: Omit<Fixa, "id">) => void }) {
 
 function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
   const [nome, setNome] = useState("");
-  const [limite, setLimite] = useState("");
+  const [limite, setLimite] = useState<number>(0);
   const [fech, setFech] = useState("25");
   const [venc, setVenc] = useState("5");
   return (
@@ -761,12 +995,12 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
         if (!nome) return;
         onAdd({
           nome,
-          limite: Number(limite) || 0,
+          limite: limite || 0,
           fechamento: Number(fech),
           vencimento: Number(venc),
         });
         setNome("");
-        setLimite("");
+        setLimite(0);
       }}
       className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_140px_120px_120px_auto]"
     >
@@ -774,7 +1008,15 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
         <input placeholder="Ex.: Nubank" value={nome} onChange={(e) => setNome(e.target.value)} className={inputCls} />
       </Field>
       <Field label="Limite (R$)">
-        <input placeholder="0" type="number" value={limite} onChange={(e) => setLimite(e.target.value)} className={inputCls} />
+        <input
+          type="text"
+          value={formatarMoedaInput(limite)}
+          onChange={(e) => {
+            const digits = e.target.value.replace(/\D/g, "");
+            setLimite(Number(digits) / 100);
+          }}
+          className={inputCls}
+        />
       </Field>
       <Field label="Dia do fechamento">
         <input type="number" min={1} max={31} value={fech} onChange={(e) => setFech(e.target.value)} className={inputCls} />
@@ -783,7 +1025,7 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
         <input type="number" min={1} max={31} value={venc} onChange={(e) => setVenc(e.target.value)} className={inputCls} />
       </Field>
       <div className="flex items-end">
-        <button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90">
+        <button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 cursor-pointer">
           Adicionar
         </button>
       </div>
@@ -800,7 +1042,7 @@ function FormLanc({
 }) {
   const hoje = new Date().toISOString().slice(0, 10);
   const [descricao, setDescricao] = useState("");
-  const [valor, setValor] = useState("");
+  const [valor, setValor] = useState<number>(0);
   const [tipo, setTipo] = useState<TipoLanc>("debito");
   const [cardId, setCardId] = useState<string>("");
   const [parcelas, setParcelas] = useState("2");
@@ -808,7 +1050,6 @@ function FormLanc({
   const [terceiro, setTerceiro] = useState(false);
   const [terceiroNome, setTerceiroNome] = useState("");
   
-  // Novos estados para parcelamentos em andamento
   const [emAndamento, setEmAndamento] = useState(false);
   const [parcelaAtual, setParcelaAtual] = useState("2");
 
@@ -826,7 +1067,7 @@ function FormLanc({
         }
         onAdd({
           descricao,
-          valor: Number(valor),
+          valor,
           data,
           tipo,
           cardId: ehCredito ? cardId : undefined,
@@ -837,7 +1078,7 @@ function FormLanc({
           terceiroNome: terceiro && terceiroNome ? terceiroNome : undefined,
         });
         setDescricao("");
-        setValor("");
+        setValor(0);
         setTerceiro(false);
         setTerceiroNome("");
         setEmAndamento(false);
@@ -849,7 +1090,15 @@ function FormLanc({
         <input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} placeholder="Ex.: Mercado" />
       </Field>
       <Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}>
-        <input type="number" value={valor} onChange={(e) => setValor(e.target.value)} className={inputCls} placeholder={ehParcelado && emAndamento ? "Apenas uma parcela" : "0"} />
+        <input
+          type="text"
+          value={formatarMoedaInput(valor)}
+          onChange={(e) => {
+            const digits = e.target.value.replace(/\D/g, "");
+            setValor(Number(digits) / 100);
+          }}
+          className={inputCls}
+        />
       </Field>
       <Field label="Tipo">
         <select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}>
@@ -928,7 +1177,7 @@ function FormLanc({
       )}
 
       <div className="lg:col-span-4 mt-2">
-        <button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90">
+        <button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 cursor-pointer">
           Adicionar lançamento
         </button>
       </div>
