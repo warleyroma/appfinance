@@ -1,4 +1,6 @@
-
+================================================
+FILE: src/routes/app.tsx
+================================================
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -51,7 +53,9 @@ type ModoSalario = "dia_fixo" | "dia_util";
 
 type Estado = {
   salario: number;
-  ticketTransporte?: number; // campo adicionado
+  ticketTransporte?: number;
+  adiantamento?: number; // Novo campo para o vale/quinzena
+  diaAdiantamento?: number; // Novo campo para o dia do vale
   modoSalario: ModoSalario;
   diaSalario: number; // usado quando modo = dia_fixo
   diaUtilSalario: number; // usado quando modo = dia_util (ex.: 5 = 5º dia útil)
@@ -64,7 +68,9 @@ const STORAGE_KEY = "qpg.mvp.v2";
 
 const estadoInicial: Estado = {
   salario: 0,
-  ticketTransporte: 0, // inicializado com zero
+  ticketTransporte: 0,
+  adiantamento: 0, // inicializado com zero
+  diaAdiantamento: 15, // inicializado por padrão no dia 15
   modoSalario: "dia_fixo",
   diaSalario: 5,
   diaUtilSalario: 5,
@@ -122,6 +128,7 @@ function proximoDiaUtilSalario(n: number, base: Date) {
   return nthDiaUtil(d.getFullYear(), d.getMonth() + 1, n);
 }
 
+// Calcula dias entre datas de forma segura
 function diasEntre(a: Date, b: Date) {
   const ms = b.getTime() - a.getTime();
   return Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
@@ -198,12 +205,26 @@ function AppMvp() {
   }, []);
 
   const calculo = useMemo(() => {
-    const proxSalario =
+    // 1. Calcula o próximo pagamento principal (salário)
+    const proxPagamentoPrincipal =
       estado.modoSalario === "dia_util"
         ? proximoDiaUtilSalario(estado.diaUtilSalario, hoje)
         : proximaData(estado.diaSalario, hoje);
+
+    // 2. Calcula o próximo adiantamento (caso exista)
+    const temAdiantamento = (estado.adiantamento || 0) > 0;
+    const proxAdiantamento = temAdiantamento
+      ? proximaData(estado.diaAdiantamento || 15, hoje)
+      : null;
+
+    // 3. O fechamento do ciclo atual de gastos será na data de recebimento mais próxima
+    const proxSalario = proxAdiantamento && proxAdiantamento < proxPagamentoPrincipal
+      ? proxAdiantamento
+      : proxPagamentoPrincipal;
+
     const diasAte = diasEntre(hoje, proxSalario);
 
+    // 4. Mapeia contas fixas que vencem estritamente dentro deste subciclo ativo
     const fixasFuturas = estado.fixas.reduce((s, f) => {
       const venc = proximaData(f.diaVencimento, hoje);
       return venc <= proxSalario ? s + f.valor : s;
@@ -226,14 +247,21 @@ function AppMvp() {
       .filter((l) => l.terceiro)
       .reduce((s, l) => s + l.valor / (l.parcelas || 1), 0);
 
-    // Soma o Ticket Transporte à renda total
-    const rendaTotal = estado.salario + (estado.ticketTransporte || 0);
+    // 5. Define qual é a Renda Ativa que está financiando este ciclo atual:
+    // Se o próximo dinheiro a cair for o Adiantamento, estamos vivendo do Salário + VT.
+    // Se o próximo dinheiro a cair for o Salário, estamos vivendo apenas do Adiantamento.
+    const rendaCicloAtivo = temAdiantamento && proxSalario === proxPagamentoPrincipal
+      ? (estado.adiantamento || 0)
+      : estado.salario + (estado.ticketTransporte || 0);
 
     const disponivelCiclo = Math.max(
       0,
-      rendaTotal - fixasFuturas - debitoCiclo - faturas,
+      rendaCicloAtivo - fixasFuturas - debitoCiclo - faturas,
     );
     const porDia = disponivelCiclo / diasAte;
+
+    // Apenas informativo: soma mensal de todas as receitas
+    const rendaMensalTotal = estado.salario + (estado.ticketTransporte || 0) + (estado.adiantamento || 0);
 
     return {
       proxSalario,
@@ -244,7 +272,8 @@ function AppMvp() {
       gastosTerceiros,
       disponivelCiclo,
       porDia,
-      rendaTotal,
+      rendaTotal: rendaCicloAtivo,
+      rendaMensalTotal,
     };
   }, [estado, hoje]);
 
@@ -286,7 +315,7 @@ function AppMvp() {
         </p>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-4">
-          <Metric label="Renda total" valor={calculo.rendaTotal} />
+          <Metric label="Renda do Ciclo" valor={calculo.rendaTotal} />
           <Metric label="Contas fixas" valor={calculo.fixasFuturas} negative />
           <Metric label="Débito no ciclo" valor={calculo.debitoCiclo} negative />
           <Metric label="Faturas abertas" valor={calculo.faturas} negative />
@@ -296,7 +325,7 @@ function AppMvp() {
       {/* SETUP */}
       <Bloco titulo="1. Renda e ciclo">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Salário líquido (R$)">
+          <Field label="Salário líquido restante (R$)">
             <input
               type="number"
               value={estado.salario || ""}
@@ -304,6 +333,7 @@ function AppMvp() {
                 setEstado((s) => ({ ...s, salario: Number(e.target.value) || 0 }))
               }
               className={inputCls}
+              placeholder="Ex.: R$ 3.000"
             />
           </Field>
           <Field label="Ticket Transporte / VT (R$)">
@@ -314,9 +344,33 @@ function AppMvp() {
                 setEstado((s) => ({ ...s, ticketTransporte: Number(e.target.value) || 0 }))
               }
               className={inputCls}
+              placeholder="Ex.: R$ 500"
             />
           </Field>
-          <Field label="Como você recebe?">
+          <Field label="Adiantamento / Vale / Quinzena (R$)">
+            <input
+              type="number"
+              value={estado.adiantamento || ""}
+              onChange={(e) =>
+                setEstado((s) => ({ ...s, adiantamento: Number(e.target.value) || 0 }))
+              }
+              className={inputCls}
+              placeholder="Ex.: R$ 2.000"
+            />
+          </Field>
+          <Field label="Dia do adiantamento">
+            <input
+              type="number"
+              min={1}
+              max={31}
+              value={estado.diaAdiantamento}
+              onChange={(e) =>
+                setEstado((s) => ({ ...s, diaAdiantamento: Number(e.target.value) || 15 }))
+              }
+              className={inputCls}
+            />
+          </Field>
+          <Field label="Como você recebe o salário?">
             <select
               value={estado.modoSalario}
               onChange={(e) =>
@@ -325,7 +379,7 @@ function AppMvp() {
               className={inputCls}
             >
               <option value="dia_fixo">Dia fixo do mês (ex.: todo dia 5)</option>
-              <option value="dia_util">Dia útil(ex.: 5º dia útil)</option>
+              <option value="dia_util">Dia útil (ex.: 5º dia útil)</option>
             </select>
           </Field>
           {estado.modoSalario === "dia_fixo" ? (
@@ -356,18 +410,20 @@ function AppMvp() {
             </Field>
           )}
         </div>
-        {estado.modoSalario === "dia_util" && (
+        {(estado.modoSalario === "dia_util" || (estado.adiantamento || 0) > 0) && (
           <p className="mt-3 text-xs text-muted-foreground">
-            Considera segunda a sexta. Feriados nacionais ficam para uma próxima versão.
-            Próximo recebimento previsto:{" "}
+            Próxima entrada financeira prevista para:{" "}
             <strong className="text-foreground">
               {calculo.proxSalario.toLocaleString("pt-BR", {
                 weekday: "long",
                 day: "2-digit",
                 month: "long",
               })}
-            </strong>
-            .
+            </strong>{" "}
+            ({calculo.diasAte} {calculo.diasAte === 1 ? "dia restante" : "dias restantes"}).
+            {estado.adiantamento && estado.adiantamento > 0 && (
+              <span> Renda mensal total acumulada: <strong className="text-foreground">{brl(calculo.rendaMensalTotal)}</strong>.</span>
+            )}
           </p>
         )}
       </Bloco>
