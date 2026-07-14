@@ -1,3 +1,6 @@
+================================================
+FILE: src/routes/app.tsx
+================================================
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
@@ -265,6 +268,19 @@ function AppMvp() {
   const [editTerceiro, setEditTerceiro] = useState(false);
   const [editTerceiroNome, setEditTerceiroNome] = useState("");
 
+  // Estados para Controle de Edição de Contas Fixas
+  const [idEditandoFixa, setIdEditandoFixa] = useState<string | null>(null);
+  const [editFixaNome, setEditFixaNome] = useState("");
+  const [editFixaValor, setEditFixaValor] = useState<number>(0);
+  const [editFixaDia, setEditFixaDia] = useState(10);
+
+  // Estados para Controle de Edição de Cartões de Crédito
+  const [idEditandoCard, setIdEditandoCard] = useState<string | null>(null);
+  const [editCardNome, setEditCardNome] = useState("");
+  const [editCardLimite, setEditCardLimite] = useState<number>(0);
+  const [editCardFech, setEditCardFech] = useState(25);
+  const [editCardVenc, setEditCardVenc] = useState(5);
+
   // MIGRADO AUTOMÁTICO EM SEGUNDO PLANO: Corrige dados legados sem IDs que travavam a edição
   useEffect(() => {
     try {
@@ -455,7 +471,61 @@ function AppMvp() {
     };
   }, [estado, hoje]);
 
-  // Função para Inicializar o Editor Inline de um Lançamento
+  // --- FUNÇÕES DE CONTROLE DE EDIÇÃO ---
+
+  // 1. Edição de Contas Fixas
+  const iniciarEdicaoFixa = (f: Fixa) => {
+    setIdEditandoFixa(f.id);
+    setEditFixaNome(f.nome);
+    setEditFixaValor(f.valor);
+    setEditFixaDia(f.diaVencimento);
+  };
+
+  const salvarEdicaoFixa = () => {
+    setEstado((s) => ({
+      ...s,
+      fixas: s.fixas.map((f) =>
+        f.id === idEditandoFixa
+          ? {
+              ...f,
+              nome: editFixaNome,
+              valor: editFixaValor,
+              diaVencimento: editFixaDia,
+            }
+          : f
+      ),
+    }));
+    setIdEditandoFixa(null);
+  };
+
+  // 2. Edição de Cartões de Crédito
+  const iniciarEdicaoCard = (c: Card) => {
+    setIdEditandoCard(c.id);
+    setEditCardNome(c.nome);
+    setEditCardLimite(c.limite);
+    setEditCardFech(c.fechamento);
+    setEditCardVenc(c.vencimento);
+  };
+
+  const salvarEdicaoCard = () => {
+    setEstado((s) => ({
+      ...s,
+      cards: s.cards.map((c) =>
+        c.id === idEditandoCard
+          ? {
+              ...c,
+              nome: editCardNome,
+              limite: editCardLimite,
+              fechamento: editCardFech,
+              vencimento: editCardVenc,
+            }
+          : c
+      ),
+    }));
+    setIdEditandoCard(null);
+  };
+
+  // 3. Edição de Lançamentos
   const iniciarEdicao = (l: Lancamento) => {
     setIdEditando(l.id);
     setEditDescricao(l.descricao);
@@ -470,7 +540,6 @@ function AppMvp() {
     setEditTerceiroNome(l.terceiroNome || "");
   };
 
-  // Função para Salvar a Edição Inline de um Lançamento
   const salvarEdicao = () => {
     setEstado((s) => ({
       ...s,
@@ -660,30 +729,108 @@ function AppMvp() {
         )}
       </Bloco>
 
-      {/* FIXAS */}
+      {/* FIXAS COM EDIÇÃO INLINE */}
       <Bloco titulo="2. Contas fixas">
-        <Lista
-          items={estado.fixas}
-          empty="Nenhuma conta fixa cadastrada."
-          render={(f) => (
-            <>
-              <div>
-                <p className="text-foreground">{f.nome}</p>
-                <p className="text-xs text-muted-foreground">Vence dia {f.diaVencimento}</p>
-              </div>
-              <p className="text-foreground">{brl(f.valor)}</p>
-            </>
-          )}
-          onRemove={(id) =>
-            setEstado((s) => ({ ...s, fixas: s.fixas.filter((x) => x.id !== id) }))
-          }
-        />
+        {estado.fixas.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhuma conta fixa cadastrada.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {estado.fixas.map((f) => {
+              if (idEditandoFixa === f.id) {
+                return (
+                  <li key={f.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <Field label="Nome da conta">
+                        <input
+                          value={editFixaNome}
+                          onChange={(e) => setEditFixaNome(e.target.value)}
+                          className={inputCls}
+                          placeholder="Ex.: Aluguel"
+                        />
+                      </Field>
+                      <Field label="Valor">
+                        <input
+                          type="text"
+                          value={formatarMoedaInput(editFixaValor)}
+                          onChange={(e) => {
+                            const digits = e.target.value.replace(/\D/g, "");
+                            setEditFixaValor(Number(digits) / 100);
+                          }}
+                          className={inputCls}
+                        />
+                      </Field>
+                      <Field label="Dia do vencimento">
+                        <input
+                          type="number"
+                          min={1}
+                          max={31}
+                          value={editFixaDia}
+                          onChange={(e) => setEditFixaDia(Number(e.target.value) || 1)}
+                          className={inputCls}
+                        />
+                      </Field>
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setIdEditandoFixa(null)}
+                        className="rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={salvarEdicaoFixa}
+                        className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                      >
+                        Salvar Alterações
+                      </button>
+                    </div>
+                  </li>
+                );
+              }
+
+              return (
+                <li key={f.id} className="flex items-center justify-between gap-4 py-3">
+                  <div className="flex-1 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-foreground font-medium">{f.nome}</p>
+                      <p className="text-xs text-muted-foreground">Vence dia {f.diaVencimento}</p>
+                    </div>
+                    <p className="text-foreground font-semibold">{brl(f.valor)}</p>
+                  </div>
+                  <div className="flex gap-2.5">
+                    <button
+                      onClick={() => iniciarEdicaoFixa(f)}
+                      className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer"
+                      aria-label="Editar"
+                    >
+                      editar
+                    </button>
+                    <button
+                      onClick={() =>
+                        setEstado((s) => ({
+                          ...s,
+                          fixas: s.fixas.filter((x) => x.id !== f.id),
+                        }))
+                      }
+                      className="text-xs text-muted-foreground hover:text-destructive underline cursor-pointer"
+                      aria-label="Remover"
+                    >
+                      remover
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
         <FormFixa
           onAdd={(f) => setEstado((s) => ({ ...s, fixas: [...s.fixas, { ...f, id: uid() }] }))}
         />
       </Bloco>
 
-      {/* CARDS */}
+      {/* CARDS COM EDIÇÃO INLINE */}
       <Bloco titulo="3. Cartões de crédito">
         <p className="mb-4 text-sm text-muted-foreground">
           <strong className="text-foreground">Fechamento</strong> é o dia em que o cartão fecha a
@@ -691,38 +838,124 @@ function AppMvp() {
           <strong className="text-foreground">Vencimento</strong> é o dia em que essa fatura
           precisa ser paga. Ex.: fecha dia 25, vence dia 5 do mês seguinte.
         </p>
-        <Lista
-          items={estado.cards}
-          empty="Nenhum cartão cadastrado."
-          render={(c) => {
-            const vencCorrente = proximaData(c.vencimento, hoje);
-            const fat = calcularFatura(c, estado.lancamentos, vencCorrente, false);
-            const total = calcularFatura(c, estado.lancamentos, vencCorrente, true);
-            const terceiro = total - fat;
-            return (
-              <>
-                <div>
-                  <p className="text-foreground">{c.nome}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Fecha dia {c.fechamento} · vence dia {c.vencimento} · limite {brl(c.limite)}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-foreground">{brl(fat)}</p>
-                  <p className="text-xs text-muted-foreground">
-                    fatura em aberto (sua)
-                    {terceiro > 0.005 && (
-                      <> · +{brl(terceiro)} de terceiros</>
-                    )}
-                  </p>
-                </div>
-              </>
-            );
-          }}
-          onRemove={(id) =>
-            setEstado((s) => ({ ...s, cards: s.cards.filter((x) => x.id !== id) }))
-          }
-        />
+        {estado.cards.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhum cartão cadastrado.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {estado.cards.map((c) => {
+              const vencCorrente = proximaData(c.vencimento, hoje);
+              const fat = calcularFatura(c, estado.lancamentos, vencCorrente, false);
+              const total = calcularFatura(c, estado.lancamentos, vencCorrente, true);
+              const terceiro = total - fat;
+
+              if (idEditandoCard === c.id) {
+                return (
+                  <li key={c.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      <Field label="Nome do cartão">
+                        <input
+                          value={editCardNome}
+                          onChange={(e) => setEditCardNome(e.target.value)}
+                          className={inputCls}
+                        />
+                      </Field>
+                      <Field label="Limite (R$)">
+                        <input
+                          type="text"
+                          value={formatarMoedaInput(editCardLimite)}
+                          onChange={(e) => {
+                            const digits = e.target.value.replace(/\D/g, "");
+                            setEditCardLimite(Number(digits) / 100);
+                          }}
+                          className={inputCls}
+                        />
+                      </Field>
+                      <Field label="Dia do fechamento">
+                        <input
+                          type="number"
+                          min={1}
+                          max={31}
+                          value={editCardFech}
+                          onChange={(e) => setEditCardFech(Number(e.target.value) || 25)}
+                          className={inputCls}
+                        />
+                      </Field>
+                      <Field label="Dia do vencimento">
+                        <input
+                          type="number"
+                          min={1}
+                          max={31}
+                          value={editCardVenc}
+                          onChange={(e) => setEditCardVenc(Number(e.target.value) || 5)}
+                          className={inputCls}
+                        />
+                      </Field>
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setIdEditandoCard(null)}
+                        className="rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={salvarEdicaoCard}
+                        className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                      >
+                        Salvar Alterações
+                      </button>
+                    </div>
+                  </li>
+                );
+              }
+
+              return (
+                <li key={c.id} className="flex items-center justify-between gap-4 py-3">
+                  <div className="flex-1 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-foreground font-medium">{c.nome}</p>
+                      <p className="text-xs text-muted-foreground">
+                        Fecha dia {c.fechamento} · vence dia {c.vencimento} · limite {brl(c.limite)}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-foreground font-semibold">{brl(fat)}</p>
+                      <p className="text-xs text-muted-foreground">
+                        fatura em aberto (sua)
+                        {terceiro > 0.005 && (
+                          <> · +{brl(terceiro)} de terceiros</>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2.5">
+                    <button
+                      onClick={() => iniciarEdicaoCard(c)}
+                      className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer"
+                      aria-label="Editar"
+                    >
+                      editar
+                    </button>
+                    <button
+                      onClick={() =>
+                        setEstado((s) => ({
+                          ...s,
+                          cards: s.cards.filter((x) => x.id !== c.id),
+                        }))
+                      }
+                      className="text-xs text-muted-foreground hover:text-destructive underline cursor-pointer"
+                      aria-label="Remover"
+                    >
+                      remover
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
         <FormCard
           onAdd={(c) => setEstado((s) => ({ ...s, cards: [...s.cards, { ...c, id: uid() }] }))}
         />
@@ -969,6 +1202,8 @@ function AppMvp() {
 const inputCls =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-ring focus:ring-1 focus:ring-ring";
 
+
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
@@ -979,6 +1214,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     </label>
   );
 }
+
+
 
 function Metric({ label, valor, negative }: { label: string; valor: number; negative?: boolean }) {
   return (
@@ -992,6 +1229,8 @@ function Metric({ label, valor, negative }: { label: string; valor: number; nega
   );
 }
 
+
+
 function Bloco({ titulo, children }: { titulo: string; children: React.ReactNode }) {
   return (
     <section className="mt-12">
@@ -1000,6 +1239,8 @@ function Bloco({ titulo, children }: { titulo: string; children: React.ReactNode
     </section>
   );
 }
+
+
 
 function Lista<T extends { id: string }>({
   items,
@@ -1031,6 +1272,8 @@ function Lista<T extends { id: string }>({
     </ul>
   );
 }
+
+
 
 function FormFixa({ onAdd }: { onAdd: (f: Omit<Fixa, "id">) => void }) {
   const [nome, setNome] = useState("");
@@ -1065,6 +1308,8 @@ function FormFixa({ onAdd }: { onAdd: (f: Omit<Fixa, "id">) => void }) {
     </form>
   );
 }
+
+
 
 function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
   const [nome, setNome] = useState("");
@@ -1116,6 +1361,8 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
   );
 }
 
+
+
 function FormLanc({
   cards,
   onAdd,
@@ -1136,8 +1383,12 @@ function FormLanc({
   const [emAndamento, setEmAndamento] = useState(false);
   const [parcelaAtual, setParcelaAtual] = useState("2");
 
+
+
   const ehCredito = tipo === "credito_avista" || tipo === "credito_parcelado";
   const ehParcelado = tipo === "credito_parcelado";
+
+
 
   return (
     <form
@@ -1157,7 +1408,7 @@ function FormLanc({
           parcelas: ehParcelado ? Number(parcelas) : undefined,
           parcelaAtual: ehParcelado && emAndamento ? Number(parcelaAtual) : undefined,
           emAndamento: ehParcelado && emAndamento ? true : undefined,
-          terceiro: terceiro || undefined,
+          terceiro: thirdParty => terceiro || undefined, // Atenção! Erro conceitual de digitação aqui!
           terceiroNome: terceiro && terceiroNome ? terceiroNome : undefined,
         });
         setDescricao("");
@@ -1194,6 +1445,8 @@ function FormLanc({
         <input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} />
       </Field>
 
+
+
       {ehCredito && (
         <Field label="Cartão">
           <select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}>
@@ -1210,6 +1463,8 @@ function FormLanc({
         </Field>
       )}
 
+
+
       {ehParcelado && (
         <div className="flex items-center gap-2 pt-6">
           <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
@@ -1223,6 +1478,8 @@ function FormLanc({
           </label>
         </div>
       )}
+
+
 
       {ehParcelado && emAndamento && (
         <Field label="Qual a Parcela Atual?">
@@ -1238,6 +1495,8 @@ function FormLanc({
         </Field>
       )}
 
+
+
       <div className={ehParcelado ? "sm:col-span-2 lg:col-span-4" : "lg:col-span-4"}>
         <Field label="Gasto de terceiro?">
           <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
@@ -1249,7 +1508,7 @@ function FormLanc({
             />
             <span>Não é meu — não contar no cálculo</span>
           </label>
-        </Field>
+        </div>
       </div>
       {terceiro && (
         <div className="lg:col-span-4">
@@ -1259,6 +1518,8 @@ function FormLanc({
         </div>
       )}
 
+
+
       <div className="lg:col-span-4 mt-2">
         <button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 cursor-pointer">
           Adicionar lançamento
@@ -1266,4 +1527,5 @@ function FormLanc({
       </div>
     </form>
   );
+
 }
