@@ -32,7 +32,7 @@ type Card = {
 
 type Fixa = { id: string; nome: string; valor: number; diaVencimento: number };
 
-type TipoLanc = "debito" | "credito_avista" | "credito_parcelado";
+type TipoLanc = "debito" | "credito_avista" | "credito_parcelado" | "estorno";
 
 type Lancamento = {
   id: string;
@@ -44,6 +44,7 @@ type Lancamento = {
   parcelas?: number; 
   parcelaAtual?: number; 
   emAndamento?: boolean; 
+  dataRegistro?: string; // Data em que o lançamento foi inserido no app
   terceiro?: boolean; 
   terceiroNome?: string;
 };
@@ -183,12 +184,21 @@ function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, consider
   return lancs
     .filter((l) => l.cardId === card.id && (considerarTerceiros || !l.terceiro))
     .reduce((total, l) => {
-      const compDate = parseLocalDate(l.data);
+      // CORREÇÃO DE DATA: Se a compra está em andamento, ancoramos os meses que passaram à data de registro da parcela atual
+      const compDate = parseLocalDate(l.emAndamento ? (l.dataRegistro || l.data) : l.data);
 
       if (l.tipo === "credito_avista") {
         const fechAnterior = new Date(fechRef);
         fechAnterior.setMonth(fechAnterior.getMonth() - 1);
         if (compDate > fechAnterior && compDate <= fechRef) return total + l.valor;
+        return total;
+      }
+
+      // Estorno no cartão de crédito atua deduzindo o valor total da fatura
+      if (l.tipo === "estorno") {
+        const fechAnterior = new Date(fechRef);
+        fechAnterior.setMonth(fechAnterior.getMonth() - 1);
+        if (compDate > fechAnterior && compDate <= fechRef) return total - l.valor;
         return total;
       }
 
@@ -215,7 +225,7 @@ function obterLabelParcela(l: Lancamento, card?: Card, hoje?: Date) {
   if (!card || !hoje) return `${l.parcelas}x`;
   const vencCorrente = proximaData(card.vencimento, hoje);
   const fechRef = obterFechamentoParaVencimento(vencCorrente, card.fechamento, card.vencimento);
-  const compDate = parseLocalDate(l.data);
+  const compDate = parseLocalDate(l.emAndamento ? (l.dataRegistro || l.data) : l.data);
   const fechNoMes = new Date(compDate.getFullYear(), compDate.getMonth(), Math.min(card.fechamento, new Date(compDate.getFullYear(), compDate.getMonth() + 1, 0).getDate()));
   let fechCompra = fechNoMes;
   if (compDate > fechNoMes) {
@@ -259,7 +269,7 @@ function AppMvp() {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        const lancamentosMapeados = (parsed.lancamentos || []).map((l: any) => ({ ...l, id: l.id || uid() }));
+        const lancamentosMapeados = (parsed.lancamentos || []).map((l: any) => ({ ...l, id: l.id || uid(), dataRegistro: l.dataRegistro || l.data }));
         const fixasMapeadas = (parsed.fixas || []).map((f: any) => ({ ...f, id: f.id || uid() }));
         const cardsMapeados = (parsed.cards || []).map((c: any) => ({ ...c, id: c.id || uid() }));
         setEstado({ ...estadoInicial, ...parsed, lancamentos: lancamentosMapeados, fixas: fixasMapeadas, cards: cardsMapeados });
@@ -304,13 +314,17 @@ function AppMvp() {
       return venc < proxSalario ? s + f.valor : s;
     }, 0);
 
+    // Lançamentos no débito e Estornos sem cartão devolvem saldo ao ciclo ativo
     const debitoCiclo = estado.lancamentos
-      .filter((l) => l.tipo === "debito" && !l.terceiro)
+      .filter((l) => (l.tipo === "debito" || (l.tipo === "estorno" && !l.cardId)) && !l.terceiro)
       .filter((l) => {
         const d = parseLocalDate(l.data);
         return d >= inicioCiclo && d <= hoje;
       })
-      .reduce((s, l) => s + l.valor, 0);
+      .reduce((s, l) => {
+        if (l.tipo === "estorno") return s - l.valor; // Estorno no débito deduz dos gastos (devolve saldo)
+        return s + l.valor;
+      }, 0);
 
     const faturas = estado.cards.reduce((s, c) => {
       const vencRef = proximaData(c.vencimento, hoje);
@@ -353,7 +367,7 @@ function AppMvp() {
   const salvarEdicaoCard = () => { setEstado((s) => ({ ...s, cards: s.cards.map((c) => c.id === idEditandoCard ? { ...c, nome: editCardNome, limite: editCardLimite, fechamento: editCardFech, vencimento: editCardVenc } : c) })); setIdEditandoCard(null); };
 
   const iniciarEdicao = (l: Lancamento) => { setIdEditando(l.id); setEditDescricao(l.descricao); setEditValor(l.valor); setEditTipo(l.tipo); setEditCardId(l.cardId || ""); setEditParcelas(l.parcelas || 2); setEditParcelaAtual(l.parcelaAtual || 2); setEditEmAndamento(!!l.emAndamento); setEditData(l.data); setEditTerceiro(!!l.terceiro); setEditTerceiroNome(l.terceiroNome || ""); };
-  const salvarEdicao = () => { setEstado((s) => ({ ...s, lancamentos: s.lancamentos.map((l) => l.id === idEditando ? { ...l, descricao: editDescricao, valor: editValor, tipo: editTipo, cardId: (editTipo.includes("credito")) ? (editCardId || undefined) : undefined, parcelas: editTipo === "credito_parcelado" ? editParcelas : undefined, parcelaAtual: (editTipo === "credito_parcelado" && editEmAndamento) ? editParcelaAtual : undefined, emAndamento: (editTipo === "credito_parcelado" && editEmAndamento) ? true : undefined, data: editData, terceiro: editTerceiro || undefined, terceiroNome: editTerceiro && editTerceiroNome ? editTerceiroNome : undefined } : l) })); setIdEditando(null); };
+  const salvarEdicao = () => { setEstado((s) => ({ ...s, lancamentos: s.lancamentos.map((l) => l.id === idEditando ? { ...l, descricao: editDescricao, valor: editValor, tipo: editTipo, cardId: (editTipo.includes("credito") || editTipo === "estorno") ? (editCardId || undefined) : undefined, parcelas: editTipo === "credito_parcelado" ? editParcelas : undefined, parcelaAtual: (editTipo === "credito_parcelado" && editEmAndamento) ? editParcelaAtual : undefined, emAndamento: (editTipo === "credito_parcelado" && editEmAndamento) ? true : undefined, data: editData, terceiro: editTerceiro || undefined, terceiroNome: editTerceiro && editTerceiroNome ? editTerceiroNome : undefined } : l) })); setIdEditando(null); };
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-14">
@@ -428,7 +442,6 @@ function AppMvp() {
         <FormFixa onAdd={(f) => setEstado((s) => ({ ...s, fixas: [...s.fixas, { ...f, id: uid() }] }))} />
       </Bloco>
 
-      {/* CARDS COM EDIÇÃO INLINE */}
       <Bloco titulo="3. Cartões de crédito">
         <ul className="divide-y divide-border">
           {estado.cards.map((c) => idEditandoCard === c.id ? (
@@ -451,28 +464,59 @@ function AppMvp() {
         <FormCard onAdd={(c) => setEstado((s) => ({ ...s, cards: [...s.cards, { ...c, id: uid() }] }))} />
       </Bloco>
 
-      {/* LANÇAMENTOS COM EDIÇÃO INLINE */}
       <Bloco titulo="4. Lançamentos">
         <ul className="divide-y divide-border">
-          {/* CORREÇÃO CRÍTICA: Impedir a mutação direta do estado no render criando uma cópia antes do sort */}
           {[...estado.lancamentos].sort((a, b) => a.data < b.data ? 1 : -1).map((l) => idEditando === l.id ? (
             <li key={l.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <Field label="Descrição"><input value={editDescricao} onChange={(e) => setEditDescricao(e.target.value)} className={inputCls} /></Field>
                 <Field label="Valor"><input type="text" value={formatarMoedaInput(editValor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditValor(Number(d) / 100); }} className={inputCls} /></Field>
-                <Field label="Tipo"><select value={editTipo} onChange={(e) => setEditTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option></select></Field>
+                <Field label="Tipo">
+                  <select value={editTipo} onChange={(e) => setEditTipo(e.target.value as TipoLanc)} className={inputCls}>
+                    <option value="debito">Débito</option>
+                    <option value="estorno">Estorno</option>
+                    <option value="credito_avista">Crédito à vista</option>
+                    <option value="credito_parcelado">Crédito parcelado</option>
+                  </select>
+                </Field>
                 <Field label="Data"><input type="date" value={editData} onChange={(e) => setEditData(e.target.value)} className={inputCls} /></Field>
+                
+                {(editTipo.includes("credito") || editTipo === "estorno") && (
+                  <Field label={editTipo === "estorno" ? "Cartão (opcional)" : "Cartão"}>
+                    <select value={editCardId} onChange={(e) => setEditCardId(e.target.value)} className={inputCls}>
+                      <option value="">{editTipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>
+                      {estado.cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}
+                    </select>
+                  </Field>
+                )}
               </div>
               <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditando(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicao} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
             </li>
           ) : (
             <li key={l.id} className="flex items-center justify-between py-3">
-              <div className="flex-1 flex items-center justify-between gap-4"><div><p className="font-medium">{l.descricao}{l.terceiro && <span className="ml-2 text-[10px] bg-accent/10 px-1 uppercase tracking-wider text-accent font-semibold">terceiro</span>}</p><p className="text-xs text-muted-foreground">{parseLocalDate(l.data).toLocaleDateString("pt-BR")} · {l.tipo === "debito" ? "débito" : `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · ${obterLabelParcela(l, estado.cards.find(x => x.id === l.cardId), hoje)}`}</p></div><p className="font-semibold">{brl(l.valor)}</p></div>
+              <div className="flex-1 flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium">
+                    {l.descricao}
+                    {l.terceiro && <span className="ml-2 text-[10px] bg-accent/10 px-1 uppercase tracking-wider text-accent">terceiro</span>}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {parseLocalDate(l.data).toLocaleDateString("pt-BR")} · {
+                      l.tipo === "debito" 
+                        ? "débito" 
+                        : l.tipo === "estorno"
+                          ? `${l.cardId ? `estorno no ${estado.cards.find(x => x.id === l.cardId)?.nome}` : "estorno em conta"}`
+                          : `${estado.cards.find(x => x.id === l.cardId)?.nome || "cartão"} · ${obterLabelParcela(l, estado.cards.find(x => x.id === l.cardId), hoje)}`
+                    }
+                  </p>
+                </div>
+                <p className={`font-semibold ${l.tipo === "estorno" ? "text-green-600" : ""}`}>{l.tipo === "estorno" ? "+" : ""}{brl(l.valor)}</p>
+              </div>
               <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicao(l)} className="text-xs underline cursor-pointer">editar</button><button onClick={() => setEstado(s => ({ ...s, lancamentos: s.lancamentos.filter(x => x.id !== l.id) }))} className="text-xs text-destructive underline cursor-pointer">remover</button></div>
             </li>
           ))}
         </ul>
-        <FormLanc cards={estado.cards} onAdd={(l) => setEstado((s) => ({ ...s, lancamentos: [...s.lancamentos, { ...l, id: uid() }] }))} />
+        <FormLanc cards={estado.cards} onAdd={(l) => setEstado((s) => ({ ...s, lancamentos: [...s.lancamentos, { ...l, id: uid(), dataRegistro: hoje.toISOString().slice(0, 10) }] }))} />
       </Bloco>
 
       <div className="mt-16 flex items-center justify-between border-t border-border pt-6 text-sm text-muted-foreground">
@@ -500,6 +544,6 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
 
 function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento, "id">) => void }) {
   const [descricao, setDescricao] = useState(""); const [valor, setValor] = useState<number>(0); const [tipo, setTipo] = useState<TipoLanc>("debito"); const [cardId, setCardId] = useState(""); const [parcelas, setParcelas] = useState("2"); const [data, setData] = useState(new Date().toISOString().slice(0, 10)); const [terceiro, setTerceiro] = useState(false); const [emAndamento, setEmAndamento] = useState(false); const [parcelaAtual, setParcelaAtual] = useState("2");
-  const ehCredito = tipo.includes("credito"); const ehParcelado = tipo === "credito_parcelado";
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: ehCredito ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label="Valor"><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label="Cartão"><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">Selecione…</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
+  const ehCredito = tipo.includes("credito") || tipo === "estorno"; const ehParcelado = tipo === "credito_parcelado";
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
 }
