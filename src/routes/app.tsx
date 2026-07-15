@@ -605,14 +605,38 @@ function runFinancialEngine(estado: Estado, hoje: Date) {
   const diasAteProximaEntrada = diasEntre(hoje, dataProximaEntrada);
   const porDia = disponibilidade / diasAteProximaEntrada;
 
+  // 10. ESPIADA NO PRÓXIMO CICLO (do 2º evento de entrada em diante)
+  const segundaEntradaEvent = validEvents.find(
+    (ev) => ev.data > dataProximaEntrada && (ev.tipo === "salario" || ev.tipo === "adiantamento")
+  );
+  const temProximoCiclo = !!segundaEntradaEvent;
+  const fimProximoCiclo = segundaEntradaEvent ? segundaEntradaEvent.data : dataProximaEntrada;
+  const eventosProxCiclo = validEvents.filter(
+    (ev) => ev.data >= dataProximaEntrada && ev.data < fimProximoCiclo
+  );
+  const disponivelProximoCiclo = temProximoCiclo
+    ? (eventosProxCiclo.length > 0
+        ? Math.min(...eventosProxCiclo.map((ev) => ev.saldoAcumulado))
+        : currentBalance)
+    : 0;
+  const diasProximoCiclo = temProximoCiclo ? diasEntre(dataProximaEntrada, fimProximoCiclo) : 0;
+  const porDiaProximoCiclo = temProximoCiclo ? disponivelProximoCiclo / diasProximoCiclo : 0;
+
   return {
     saldoAtual: validEvents[0]?.saldoAcumulado ?? estado.saldoInicial,
     disponibilidade,
+    disponivelCiclo: disponibilidade,
     porDia,
     diasAteProximaEntrada,
     dataProximaEntrada,
+    proxSalario: dataProximaEntrada,
     timeline: validEvents,
     rendaMensalTotal: estado.salario + (estado.ticketTransporte || 0) + (estado.adiantamento || 0),
+    temProximoCiclo,
+    porDiaProximoCiclo,
+    fimProximoCiclo,
+    diasProximoCiclo,
+    disponivelProximoCiclo,
   };
 }
 
