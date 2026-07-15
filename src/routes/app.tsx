@@ -156,25 +156,27 @@ function obterFechamentoParaVencimento(vencDate: Date, fechDay: number, vencDay:
   return d;
 }
 
+// Calcula o valor total devido em uma fatura específica de cartão
 function calcularFatura(card: Card, lancs: Lancamento[], vencRef: Date, considerarTerceiros: boolean) {
   const fechRef = obterFechamentoParaVencimento(vencRef, card.fechamento, card.vencimento);
   
+  // CORREÇÃO DE LÓGICA (Fuso Horário/Calendário): Retrocede vencimento de forma segura contra transbordo de meses curtos (ex: fevereiro)
+  const vencAnterior = new Date(vencRef);
+  vencAnterior.setMonth(vencAnterior.getMonth() - 1);
+  const fechAnterior = obterFechamentoParaVencimento(vencAnterior, card.fechamento, card.vencimento);
+
   return lancs
     .filter((l) => l.cardId === card.id && (considerarTerceiros || !l.terceiro))
     .reduce((total, l) => {
       const compDate = parseLocalDate(l.emAndamento ? (l.dataRegistro || l.data) : l.data);
 
       if (l.tipo === "credito_avista") {
-        const fechAnterior = new Date(fechRef);
-        fechAnterior.setMonth(fechAnterior.getMonth() - 1);
         if (compDate > fechAnterior && compDate <= fechRef) return total + l.valor;
         return total;
       }
 
       // Estorno no cartão de crédito atua deduzindo o valor total da fatura
       if (l.tipo === "estorno") {
-        const fechAnterior = new Date(fechRef);
-        fechAnterior.setMonth(fechAnterior.getMonth() - 1);
         if (compDate > fechAnterior && compDate <= fechRef) return total - l.valor;
         return total;
       }
@@ -241,7 +243,7 @@ function obterProximoVencimentoExato(f: Fixa, hoje: Date): Date {
   return venc;
 }
 
-// CORREÇÃO DE REGEX (Parser Multi-Modo): Extrai dados de faturas em linha única ou faturas multi-linhas (Nubank/C6)
+// Algoritmo de Inteligência de Leitura e Parsing de Faturas por Texto (Regex)
 function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<Lancamento, "id">[] {
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   const results: Omit<Lancamento, "id">[] = [];
@@ -296,7 +298,6 @@ function parsePastedInvoiceText(text: string, cardId: string, hoje: Date): Omit<
         parcelaAtual = parseInt(parcelamentoMatch[1]);
         parcelas = parseInt(parcelamentoMatch[2]);
         emAndamento = true;
-        // Limpa a numeração da descrição
         descricao = descricao.replace(parcelamentoMatch[0], "").trim();
       }
 
@@ -715,6 +716,7 @@ function AppMvp() {
         </div>
       </Bloco>
 
+      {/* FIXAS COM EDIÇÃO INLINE */}
       <Bloco titulo="2. Contas fixas">
         {estado.fixas.length === 0 ? (
           <p className="text-sm text-muted-foreground">Nenhuma conta fixa cadastrada.</p>
@@ -746,28 +748,53 @@ function AppMvp() {
         <FormFixa onAdd={(f) => setEstado((s) => ({ ...s, fixas: [...s.fixas, { ...f, id: uid() }] }))} />
       </Bloco>
 
+      {/* CARDS COM EDIÇÃO INLINE */}
       <Bloco titulo="3. Cartões de crédito">
         <ul className="divide-y divide-border">
-          {estado.cards.map((c) => idEditandoCard === c.id ? (
-            <li key={c.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <Field label="Nome"><input value={editCardNome} onChange={(e) => setEditCardNome(e.target.value)} className={inputCls} /></Field>
-                <Field label="Limite"><input type="text" value={formatarMoedaInput(editCardLimite)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditCardLimite(Number(d) / 100); }} className={inputCls} /></Field>
-                <Field label="Fecha"><input type="number" value={editCardFech} onChange={(e) => setEditCardFech(Number(e.target.value) || 1)} className={inputCls} /></Field>
-                <Field label="Vence"><input type="number" value={editCardVenc} onChange={(e) => setEditCardVenc(Number(e.target.value) || 1)} className={inputCls} /></Field>
-              </div>
-              <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoCard(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoCard} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
-            </li>
-          ) : (
-            <li key={c.id} className="flex items-center justify-between py-3">
-              <div className="flex-1 flex items-center justify-between gap-4"><div><p className="font-medium">{c.nome}</p><p className="text-xs text-muted-foreground">Fecha {c.fechamento} · Vence {c.vencimento}</p></div><p className="font-semibold">{brl(calcularFatura(c, estado.lancamentos, proximaData(c.vencimento, hoje), false))}</p></div>
-              <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoCard(c)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, cards: s.cards.filter(x => x.id !== c.id) }))} className="text-xs text-destructive underline">remover</button></div>
-            </li>
-          ))}
+          {estado.cards.map((c) => {
+            const vencCorrente = proximaData(c.vencimento, hoje);
+            const fat = calcularFatura(c, estado.lancamentos, vencCorrente, false);
+            const total = calcularFatura(c, estado.lancamentos, vencCorrente, true);
+            const terceiro = total - fat;
+
+            if (idEditandoCard === c.id) {
+              return (
+                <li key={c.id} className="py-4 space-y-3 bg-muted/30 p-4 rounded-lg my-2 border border-border/50">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <Field label="Nome"><input value={editCardNome} onChange={(e) => setEditCardNome(e.target.value)} className={inputCls} /></Field>
+                    <Field label="Limite"><input type="text" value={formatarMoedaInput(editCardLimite)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEditCardLimite(Number(d) / 100); }} className={inputCls} /></Field>
+                    <Field label="Fecha"><input type="number" value={editCardFech} onChange={(e) => setEditCardFech(Number(e.target.value) || 1)} className={inputCls} /></Field>
+                    <Field label="Vence"><input type="number" value={editCardVenc} onChange={(e) => setEditCardVenc(Number(e.target.value) || 1)} className={inputCls} /></Field>
+                  </div>
+                  <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditandoCard(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicaoCard} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
+                </li>
+              );
+            }
+
+            return (
+              <li key={c.id} className="flex items-center justify-between py-3">
+                <div className="flex-1 flex items-center justify-between gap-4">
+                  <div>
+                    <p className="font-medium">{c.nome}</p>
+                    <p className="text-xs text-muted-foreground">Fecha {c.fechamento} · Vence {c.vencimento}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-semibold text-foreground">{brl(total)}</p>
+                    <p className="text-[11px] text-muted-foreground leading-tight">
+                      Sua parte: {brl(fat)}
+                      {terceiro > 0.005 && <> · Terceiros: {brl(terceiro)}</>}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-2 ml-4"><button onClick={() => iniciarEdicaoCard(c)} className="text-xs underline">editar</button><button onClick={() => setEstado(s => ({ ...s, cards: s.cards.filter(x => x.id !== c.id) }))} className="text-xs text-destructive underline">remover</button></div>
+              </li>
+            );
+          })}
         </ul>
         <FormCard onAdd={(c) => setEstado((s) => ({ ...s, cards: [...s.cards, { ...c, id: uid() }] }))} />
       </Bloco>
 
+      {/* LANÇAMENTOS COM EDIÇÃO INLINE */}
       <Bloco titulo="4. Lançamentos">
         {/* BOTÃO DO IMPORTADOR INTELIGENTE (🪄 COPIA-E-COLA) */}
         <div className="mb-4">
@@ -897,7 +924,48 @@ function AppMvp() {
                     </Field>
                   )}
                 </div>
-                <div className="flex justify-end gap-2"><button type="button" onClick={() => setIdEditando(null)} className="text-xs p-2">Cancelar</button><button type="button" onClick={salvarEdicao} className="rounded bg-primary px-3 py-1 text-xs text-white">Salvar</button></div>
+
+                {/* CORREÇÃO DO LAYOUT: Adiciona os campos de Terceiro na Edição Inline que estavam ausentes */}
+                <div className="space-y-3 mt-1">
+                  <label className="flex items-center gap-2 text-xs cursor-pointer font-medium text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={editTerceiro}
+                      onChange={(e) => setEditTerceiro(e.target.checked)}
+                      className="h-4 w-4"
+                    />
+                    <span>Gasto de terceiro (não contar no cálculo pessoal)</span>
+                  </label>
+                  {editTerceiro && (
+                    <div className="max-w-xs">
+                      <Field label="Nome de quem gastou">
+                        <input
+                          value={editTerceiroNome}
+                          onChange={(e) => setEditTerceiroNome(e.target.value)}
+                          className={inputCls}
+                          placeholder="Ex: Mãe"
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIdEditando(null)}
+                    className="rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={salvarEdicao}
+                    className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 cursor-pointer"
+                  >
+                    Salvar Alterações
+                  </button>
+                </div>
               </li>
             ) : (
               <li key={l.id} className="flex items-center justify-between py-3">
@@ -974,5 +1042,21 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
 function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento, "id">) => void }) {
   const [descricao, setDescricao] = useState(""); const [valor, setValor] = useState<number>(0); const [tipo, setTipo] = useState<TipoLanc>("debito"); const [cardId, setCardId] = useState(""); const [parcelas, setParcelas] = useState("2"); const [data, setData] = useState(new Date().toISOString().slice(0, 10)); const [terceiro, setTerceiro] = useState(false); const [emAndamento, setEmAndamento] = useState(false); const [parcelaAtual, setParcelaAtual] = useState("2");
   const ehCredito = tipo.includes("credito") || tipo === "estorno"; const ehParcelado = tipo === "credito_parcelado";
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field><Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}><input type="text" value={formatarMoedaInput(valor)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }} className={inputCls} /></Field><Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field>
+      <Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}>
+        <div className="relative">
+          <input
+            type="text"
+            value={formatarMoedaInput(valor)}
+            onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setValor(Number(d) / 100); }}
+            className={inputCls}
+          />
+          {ehParcelado && !emAndamento && valor > 0 && (
+            <span className="absolute left-0 -bottom-4 text-[10px] text-accent font-semibold">
+              ✨ Projeção: {parcelas} parcelas de {brl(valor / (Number(parcelas) || 1))}
+            </span>
+          )}
+        </div>
+      </Field>
+      <Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
 }
