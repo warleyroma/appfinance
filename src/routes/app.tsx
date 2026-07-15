@@ -28,7 +28,7 @@ type Card = {
   limite: number;
   fechamento: number; // dia do mês
   vencimento: number; // dia do mês
-  valorFaturaAtual?: number; // Dívida pendente informada no onboarding
+  valorFaturaAtual?: number; // Dívida de onboarding para a primeira fatura
   faturaPaga?: boolean;
 };
 
@@ -73,17 +73,10 @@ type FinanceEvent = {
 type ModoSalario = "dia_fixo" | "dia_util";
 
 type Estado = {
-  onboardingCompleto: boolean;
-  onboardingPasso: number;
   saldoInicial: number;
-  ultimoSalarioJaCaiu: boolean;
-  pagouContasAnteriores: boolean;
-  temFaturaPendente: boolean;
-  modoComecarHoje: boolean;
-
   salario: number;
   ticketTransporte?: number;
-  temAdiantamento?: boolean;
+  temAdiantamento?: boolean; // Define se possui adiantamento
   adiantamento?: number;
   dataUltimoSalario?: string; // Data real preenchida pelo usuário
   dataProximoSalario?: string; // Data estimada preenchida pelo usuário
@@ -106,17 +99,10 @@ const obterDataPadrao = (dia: number, offsetMes: number) => {
 };
 
 const estadoInicial: Estado = {
-  onboardingCompleto: false,
-  onboardingPasso: 1,
   saldoInicial: 0,
-  ultimoSalarioJaCaiu: true,
-  pagouContasAnteriores: true,
-  temFaturaPendente: false,
-  modoComecarHoje: true,
-
   salario: 0,
   ticketTransporte: 0,
-  temAdiantamento: false,
+  temAdiantamento: false, 
   adiantamento: 0,
   dataUltimoSalario: obterDataPadrao(5, 0),
   dataProximoSalario: obterDataPadrao(5, 1),
@@ -170,21 +156,6 @@ function proximaData(diaAlvo: number, base: Date) {
   if (alvo < d) {
     const ultimoProx = new Date(ano, mes + 2, 0).getDate();
     alvo = new Date(ano, mes + 1, Math.min(diaAlvo, ultimoProx));
-  }
-  return alvo;
-}
-
-function obterUltimaData(diaAlvo: number, base: Date) {
-  const d = new Date(base);
-  d.setHours(0, 0, 0, 0);
-  const ano = d.getFullYear();
-  const mes = d.getMonth();
-  const ultimoDia = new Date(ano, mes + 1, 0).getDate();
-  const dia = Math.min(diaAlvo, ultimoDia);
-  let alvo = new Date(ano, mes, dia);
-  if (alvo > d) {
-    const ultimoAnterior = new Date(ano, mes, 0).getDate();
-    alvo = new Date(ano, mes - 1, Math.min(diaAlvo, ultimoAnterior));
   }
   return alvo;
 }
@@ -648,7 +619,10 @@ function runFinancialEngine(estado: Estado, hoje: Date) {
 
 // ---------- Componente ----------
 function AppMvp() {
-  const [estado, setEstado] = useState<Estado>(estadoInicial);
+  const [estado, setEstado] = useState<Estado>({
+    ...estadoInicial,
+    onboardingCompleto: true, // Começa diretamente no app por padrão
+  });
   const [hidratado, setHidratado] = useState(false);
 
   // Estados do Importador
@@ -707,7 +681,14 @@ function AppMvp() {
         });
 
         const cardsMapeados = (parsed.cards || []).map((c: any) => ({ ...c, id: c.id || uid() }));
-        setEstado({ ...estadoInicial, ...parsed, lancamentos: lancamentosMapeados, fixas: fixasMapeadas, cards: cardsMapeados });
+        setEstado({ 
+          ...estadoInicial, 
+          ...parsed, 
+          onboardingCompleto: true, // Sobrescreve sempre para garantir que inicie no app
+          lancamentos: lancamentosMapeados, 
+          fixas: fixasMapeadas, 
+          cards: cardsMapeados 
+        });
       }
     } catch { }
     setHidratado(true);
@@ -839,175 +820,10 @@ function AppMvp() {
     alert(`${listosParaImportar.length} lançamentos importados com sucesso!`);
   };
 
-  // --- SUBMETEDORES DO ASSISTENTE DE ONBOARDING ---
-  const avancarOnboarding = () => {
-    setEstado((s) => ({ ...s, onboardingPasso: s.onboardingPasso + 1 }));
-  };
-
-  const finalizarOnboarding = () => {
-    let contasFixasAtualizadas = [...estado.fixas];
-    if (estado.pagouContasAnteriores) {
-      // Se respondeu SIM, marca todas as contas vencidas antes de hoje como quitadas ("paga")
-      contasFixasAtualizadas = estado.fixas.map(f => {
-        const dVenc = parseLocalDate(f.dataVencimento);
-        if (dVenc < hoje) {
-          return { ...f, status: "paga" as const };
-        }
-        return f;
-      });
-    }
-
-    setEstado((s) => ({
-      ...s,
-      fixas: contasFixasAtualizadas,
-      onboardingCompleto: true,
-    }));
-  };
-
-  // --- RENDERIZADOR DO ONBOARDING WIZARD ---
-  if (!estado.onboardingCompleto) {
-    return (
-      <main className="mx-auto max-w-lg px-6 py-20">
-        <div className="rounded-2xl border border-border bg-card p-8 shadow-sm">
-          <p className="text-xs uppercase tracking-[0.2em] text-accent font-semibold">Passo {estado.onboardingPasso} de 5 · Boas-vindas</p>
-          
-          {estado.onboardingPasso === 1 && (
-            <div className="mt-4 space-y-4">
-              <h2 className="font-serif text-3xl text-foreground">Qual o seu saldo disponível hoje?</h2>
-              <p className="text-xs text-muted-foreground leading-relaxed font-medium">Insira o valor exato de todo o dinheiro líquido que você possui em mãos, em conta corrente ou poupança no dia de hoje.</p>
-              <Field label="Dinheiro disponível hoje (R$)">
-                <input
-                  type="text"
-                  value={formatarMoedaInput(estado.saldoInicial)}
-                  onChange={(e) => {
-                    const digits = e.target.value.replace(/\D/g, "");
-                    setEstado((s) => ({ ...s, saldoInicial: Number(digits) / 100 }));
-                  }}
-                  className={inputCls}
-                />
-              </Field>
-              <button onClick={avancarOnboarding} className="w-full mt-2 rounded-md bg-primary py-2 text-sm text-primary-foreground font-semibold cursor-pointer">Continuar</button>
-            </div>
-          )}
-
-          {estado.onboardingPasso === 2 && (
-            <div className="mt-4 space-y-4">
-              <h2 className="font-serif text-3xl text-foreground">Seu último salário já caiu?</h2>
-              <p className="text-xs text-muted-foreground leading-relaxed font-medium">O seu salário mais recente já foi depositado e faz parte do saldo inicial que você digitou no Passo 1?</p>
-              <div className="grid grid-cols-2 gap-3 py-2">
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, ultimoSalarioJaCaiu: true }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${estado.ultimoSalarioJaCaiu ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  SIM, já caiu
-                </button>
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, ultimoSalarioJaCaiu: false }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${!estado.ultimoSalarioJaCaiu ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  NÃO, ainda não
-                </button>
-              </div>
-
-              {estado.ultimoSalarioJaCaiu ? (
-                <div className="space-y-3 pt-2">
-                  <Field label="Valor do último salário recebido (R$)">
-                    <input type="text" value={formatarMoedaInput(estado.salario)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEstado(s => ({ ...s, salario: Number(d) / 100 })); }} className={inputCls} />
-                  </Field>
-                  <Field label="Dia em que o salário caiu">
-                    <input type="date" value={estado.dataUltimoSalario || obterDataPadrao(5, 0)} onChange={(e) => setEstado(s => ({ ...s, dataUltimoSalario: e.target.value }))} className={inputCls} />
-                  </Field>
-                </div>
-              ) : (
-                <div className="space-y-3 pt-2">
-                  <Field label="Valor do próximo salário estimado (R$)">
-                    <input type="text" value={formatarMoedaInput(estado.salario)} onChange={(e) => { const d = e.target.value.replace(/\D/g, ""); setEstado(s => ({ ...s, salario: Number(d) / 100 })); }} className={inputCls} />
-                  </Field>
-                  <Field label="Previsão para cair">
-                    <input type="date" value={estado.dataProximoSalario || obterDataPadrao(5, 1)} onChange={(e) => setEstado(s => ({ ...s, dataProximoSalario: e.target.value }))} className={inputCls} />
-                  </Field>
-                </div>
-              )}
-              <button onClick={avancarOnboarding} className="w-full mt-2 rounded-md bg-primary py-2 text-sm text-primary-foreground font-semibold cursor-pointer">Continuar</button>
-            </div>
-          )}
-
-          {estado.onboardingPasso === 3 && (
-            <div className="mt-4 space-y-4">
-              <h2 className="font-serif text-3xl text-foreground">Contas fixas deste mês</h2>
-              <p className="text-xs text-muted-foreground leading-relaxed font-medium">Você já realizou o pagamento de todas as despesas e boletos fixos que venceram antes de hoje neste mês?</p>
-              <div className="grid grid-cols-2 gap-3 py-2">
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, pagouContasAnteriores: true }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${estado.pagouContasAnteriores ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  SIM, tudo pago
-                </button>
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, pagouContasAnteriores: false }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${!estado.pagouContasAnteriores ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  NÃO, tenho pendentes
-                </button>
-              </div>
-              <button onClick={avancarOnboarding} className="w-full mt-2 rounded-md bg-primary py-2 text-sm text-primary-foreground font-semibold cursor-pointer">Continuar</button>
-            </div>
-          )}
-
-          {estado.onboardingPasso === 4 && (
-            <div className="mt-4 space-y-4">
-              <h2 className="font-serif text-3xl text-foreground">Seu cartão possui fatura pendente?</h2>
-              <p className="text-xs text-muted-foreground leading-relaxed font-medium">Caso você tenha faturas de cartão de crédito em aberto com vencimento para este mês, responda SIM para registrar o valor atual devido.</p>
-              <div className="grid grid-cols-2 gap-3 py-2">
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, temFaturaPendente: true }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${estado.temFaturaPendente ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  SIM, tenho faturas
-                </button>
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, temFaturaPendente: false }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${!estado.temFaturaPendente ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  NÃO, sem faturas
-                </button>
-              </div>
-              <button onClick={avancarOnboarding} className="w-full mt-2 rounded-md bg-primary py-2 text-sm text-primary-foreground font-semibold cursor-pointer">Continuar</button>
-            </div>
-          )}
-
-          {estado.onboardingPasso === 5 && (
-            <div className="mt-4 space-y-4">
-              <h2 className="font-serif text-3xl text-foreground">Começar o controle hoje?</h2>
-              <p className="text-xs text-muted-foreground leading-relaxed font-medium">Deseja desconsiderar e ocultar todo o histórico de transações antigas e iniciar os cálculos estritamente a partir das despesas de hoje? (Recomendado para evitar bagunça).</p>
-              <div className="grid grid-cols-1 gap-3 py-2">
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, modoComecarHoje: true }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${estado.modoComecarHoje ? "bg-primary text-primary-foreground border-primary font-bold" : "bg-background text-foreground border-border"}`}
-                >
-                  SIM, começar de hoje (Recomendado)
-                </button>
-                <button
-                  onClick={() => setEstado((s) => ({ ...s, modoComecarHoje: false }))}
-                  className={`rounded-md py-3 text-sm font-semibold border cursor-pointer ${!estado.modoComecarHoje ? "bg-primary text-primary-foreground border-primary" : "bg-background text-foreground border-border"}`}
-                >
-                  NÃO, considerar todo o histórico
-                </button>
-              </div>
-              <button onClick={finalizarOnboarding} className="w-full mt-2 rounded-md bg-primary py-3 text-sm text-primary-foreground font-bold cursor-pointer uppercase tracking-wider">Concluir Configuração 🪄</button>
-            </div>
-          )}
-        </div>
-      </main>
-    );
-  }
-
-  // --- RENDERIZADOR DO APLICATIVO CENTRAL (MVP PRINCIPAL) ---
   return (
     <main className="mx-auto max-w-5xl px-6 py-14">
       <div className="flex justify-between items-center text-sm text-muted-foreground mb-4">
         <Link to="/" className="hover:text-foreground">← Voltar ao roadmap</Link>
-        <button onClick={() => setEstado((s) => ({ ...s, onboardingCompleto: false, onboardingPasso: 1 }))} className="underline cursor-pointer">🪄 Refazer Onboarding</button>
       </div>
 
       <header className="mt-2">
@@ -1489,7 +1305,7 @@ function FormCard({ onAdd }: { onAdd: (c: Omit<Card, "id">) => void }) {
 function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento, "id">) => void }) {
   const [descricao, setDescricao] = useState(""); const [valor, setValor] = useState<number>(0); const [tipo, setTipo] = useState<TipoLanc>("debito"); const [cardId, setCardId] = useState(""); const [parcelas, setParcelas] = useState("2"); const [data, setData] = useState(new Date().toISOString().slice(0, 10)); const [terceiro, setTerceiro] = useState(false); const [emAndamento, setEmAndamento] = useState(false); const [parcelaAtual, setParcelaAtual] = useState("2");
   const ehCredito = tipo.includes("credito") || tipo === "estorno"; const ehParcelado = tipo === "credito_parcelado";
-  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} /></Field>
+  return (<form onSubmit={(e) => { e.preventDefault(); if (!descricao || !valor) return; if (ehCredito && tipo !== "estorno" && !cardId) return alert("Selecione um cartão"); onAdd({ descricao, valor, data, tipo, cardId: (ehCredito && cardId) ? cardId : undefined, parcelas: ehParcelado ? Number(parcelas) : undefined, parcelaAtual: (ehParcelado && emAndamento) ? Number(parcelaAtual) : undefined, emAndamento: (ehParcelado && emAndamento) ? true : undefined, terceiro: terceiro || undefined }); setDescricao(""); setValor(0); setTerceiro(false); setEmAndamento(false); }} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label="Descrição"><input value={descricao} onChange={(e) => setDescricao(e.target.value)} className={inputCls} placeholder="Ex.: Mercado" /></Field>
       <Field label={ehParcelado && emAndamento ? "Valor da Parcela (R$)" : "Valor (R$)"}>
         <div className="relative">
           <input
@@ -1506,4 +1322,382 @@ function FormLanc({ cards, onAdd }: { cards: Card[]; onAdd: (l: Omit<Lancamento,
         </div>
       </Field>
       <Field label="Tipo"><select value={tipo} onChange={(e) => setTipo(e.target.value as TipoLanc)} className={inputCls}><option value="debito">Débito</option><option value="estorno">Estorno (Devolução)</option><option value="credito_avista">À vista</option><option value="credito_parcelado">Parcelado</option><option value="credito_recorrente">Recorrente (Assinatura)</option></select></Field><Field label="Data"><input type="date" value={data} onChange={(e) => setData(e.target.value)} className={inputCls} /></Field>{ehCredito && (<Field label={tipo === "estorno" ? "Cartão (opcional)" : "Cartão"}><select value={cardId} onChange={(e) => setCardId(e.target.value)} className={inputCls}><option value="">{tipo === "estorno" ? "Não (recebi na conta)" : "Selecione…"}</option>{cards.map((c) => (<option key={c.id} value={c.id}>{c.nome}</option>))}</select></Field>)}{ehParcelado && (<Field label="Total Parcelas"><input type="number" value={parcelas} onChange={(e) => setParcelas(e.target.value)} className={inputCls} /></Field>)}{ehParcelado && (<div className="flex items-center gap-2 pt-6"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={emAndamento} onChange={(e) => setEmAndamento(e.target.checked)} className="h-4 w-4" /><span>Em andamento?</span></label></div>)}{ehParcelado && emAndamento && (<Field label="Parcela Atual"><input type="number" value={parcelaAtual} onChange={(e) => setParcelaAtual(e.target.value)} className={inputCls} /></Field>)}<div className="lg:col-span-4"><label className="flex items-center gap-2 text-sm cursor-pointer"><input type="checkbox" checked={terceiro} onChange={(e) => setTerceiro(e.target.checked)} className="h-4 w-4" /><span>Gasto de terceiro</span></label></div><div className="lg:col-span-4 mt-2"><button className="w-full rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground cursor-pointer">Adicionar lançamento</button></div></form>);
+}
+
+
+import { createFileRoute, Link } from "@tanstack/react-router";
+
+export const Route = createFileRoute("/fase-1")({
+  head: () => ({
+    meta: [
+      { title: "Fase 1 — Descoberta do problema · Quanto Posso Gastar" },
+      {
+        name: "description",
+        content:
+          "Definição do problema, personas, stakeholders, jornada, dores e objetivos — Fase 1 do case público, baseada em Design Thinking, Human Centered Design, Lean Startup e Double Diamond.",
+      },
+      { property: "og:title", content: "Fase 1 — Descoberta do problema" },
+      {
+        property: "og:description",
+        content:
+          "Entender profundamente o problema antes de pensar em solução. Personas, jornada, dores e objetivos.",
+      },
+    ],
+  }),
+  component: Fase1,
+});
+
+function Section({
+  eyebrow,
+  title,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mt-16">
+      <p className="text-xs uppercase tracking-[0.2em] text-accent">{eyebrow}</p>
+      <h2 className="mt-2 font-serif text-3xl text-foreground">{title}</h2>
+      <div className="mt-6 space-y-4 text-[17px] leading-relaxed text-foreground/90">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function Card({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <article className="rounded-lg border border-border bg-card p-6">
+      <h3 className="font-serif text-xl text-foreground"> {title}</h3>
+      {subtitle && <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>}
+      <div className="mt-4 space-y-2 text-sm leading-relaxed text-foreground/85">
+        {children}
+      </div>
+    </article>
+  );
+}
+
+function Fase1() {
+  return (
+    <main className="mx-auto max-w-3xl px-6 pt-16 pb-24">
+      {/* Header */}
+      <p className="text-sm uppercase tracking-[0.2em] text-accent">Fase 01 · Problem Discovery</p>
+      <h1 className="mt-4 font-serif text-5xl leading-tight text-foreground">
+        Descoberta do problema
+      </h1>
+      <p className="mt-6 text-lg text-muted-foreground">
+        Entender profundamente <em>o que</em> precisa ser resolvido antes de decidir <em>como</em>.
+        Base: Design Thinking, Human Centered Design (IDEO), Lean Startup e Double Diamond.
+      </p>
+
+      {/* 1. Problem statement */}
+      <Section eyebrow="1.1" title="Definição do problema">
+        <p>
+          Pessoas que usam cartão de crédito e têm renda variável ou múltiplos compromissos
+          fixos <strong>não conseguem responder em tempo real</strong> à pergunta mais básica
+          antes de uma compra: <em>“posso gastar isso agora sem me atrapalhar depois?”</em>.
+        </p>
+        <p>
+          Os apps existentes mostram <strong>o passado</strong> (extrato, categorias, gráficos
+          de gastos). O que falta é uma <strong>projeção viva</strong> que considere salário
+          previsto, contas fixas, parcelas em aberto, datas de fechamento e vencimento dos
+          cartões e o orçamento do mês — e deva um número acionável.
+        </p>
+        <blockquote className="border-l-2 border-accent pl-4 font-serif text-xl text-foreground">
+          Como podemos ajudar uma pessoa a decidir, no momento da compra, quanto ela
+          realmente pode gastar sem comprometer seu orçamento futuro?
+        </blockquote>
+      </Section>
+
+      {/* 2. Personas */}
+      <Section eyebrow="1.2" title="Personas">
+        <div className="grid gap-4 md:grid-cols-2">
+          <Card title="Marina, 29" subtitle="Analista de marketing · CLT · 2 cartões">
+            <p>
+              Salário fixo, mas parcela viagens e eletrônicos. Nunca sabe se pode passar mais
+              R$ 300 no cartão sem estourar a próxima fatura.
+            </p>
+            <p className="text-muted-foreground">
+              Dor principal: <em>ansiedade de fechamento de fatura</em>.
+            </p>
+          </Card>
+          <Card title="Rafael, 34" subtitle="Freelancer de tecnologia · renda variável">
+            <p>
+              Meses bons e ruins. Mistura PJ, poupança e cartão. Precisa saber quanto sobra
+              real antes de reservar viagem ou upgrade de equipamento.
+            </p>
+            <p className="text-muted-foreground">Dor principal: <em>previsibilidade</em>.</p>
+          </Card>
+          <Card title="Juliana, 41" subtitle="Mãe, dois filhos · orçamento familiar">
+            <p>
+              Divide contas com o parceiro, tem cartões adicionais e mensalidades escolares.
+              Quer saber se pode antecipar um gasto sem impactar a fatura seguinte.
+            </p>
+            <p className="text-muted-foreground">Dor principal: <em>orçamento compartilhado</em>.</p>
+          </Card>
+          <Card title="Diego, 24" subtitle="Primeiro emprego · aprendendo a usar cartão">
+            <p>
+              Usa cartão pela primeira vez e não entende bem o ciclo fechamento/vencimento.
+              Quer regras claras, não planilhas.
+            </p>
+            <p className="text-muted-foreground">Dor principal: <em>educação financeira aplicada</em>.</p>
+          </Card>
+        </div>
+      </Section>
+
+      {/* 3. Stakeholders */}
+      <Section eyebrow="1.3" title="Stakeholders">
+        <ul className="list-disc space-y-2 pl-6">
+          <li><strong>Usuário final</strong> — quem toma a decisão de compra.</li>
+          <li><strong>Parceiro / cônjuge</strong> — coautor do orçamento em muitos casos.</li>
+          <li><strong>Emissores de cartão</strong> — definem datas de fechamento e vencimento.</li>
+          <li><strong>Instituições financeiras</strong> — fonte de dados via Open Finance no futuro.</li>
+          <li><strong>Autor do case</strong> — dono do produto, engenheiro e “usuário-zero”.</li>
+          <li><strong>Comunidade LinkedIn</strong> — audiência do case, feedback e validação.</li>
+        </ul>
+      </Section>
+
+      {/* 4. Journey */}
+      <Section eyebrow="1.4" title="Jornada do usuário (situação atual)">
+        <ol className="space-y-4">
+          {[
+            ["Gatilho", "Usuário está prestes a fazer uma compra (loja, restaurante, viagem)."],
+            ["Dúvida", "‘Será que posso? Já gastei muito esse mês?’"],
+            ["Consulta", "Abre app do banco, olha limite disponível — número enganoso porque ignora fatura em aberto."],
+            ["Cálculo mental", "Tenta lembrar de parcelas, contas fixas, salário; erra ou desiste."],
+            ["Decisão", "Compra por impulso ou desiste com sensação de restrição sem base."],
+            ["Consequência", "Fatura chega maior do que o esperado; frustração, culpa, retrabalho."],
+          ].map(([step, desc], i) => (
+            <li key={i} className="flex gap-4">
+              <span className="font-serif text-2xl text-muted-foreground">{String(i + 1).padStart(2, "0")}</span>
+              <div>
+                <p className="font-medium text-foreground">{step}</p>
+                <p className="text-sm text-muted-foreground">{desc}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </Section>
+
+      {/* 5. Pains */}
+      <Section eyebrow="1.5" title="Dores">
+        <ul className="list-disc space-y-2 pl-6">
+          <li>Limite disponível do cartão mente — não desconta parcelas nem fatura em aberto.</li>
+          <li>Nenhum app considera <strong>data de fechamento</strong> ao projetar impacto.</li>
+          <li>Orçamento é definido no início do mês e nunca mais revisitado.</li>
+          <li>Não existe resposta rápida no momento da compra — só relatórios depois.</li>
+          <li>Renda variável quebra qualquer planilha estática.</li>
+          <li>Falta simulação: <em>“e se eu adiar essa compra para depois do fechamento?”</em></li>
+        </ul>
+      </Section>
+
+      {/* 6. Goals */}
+      <Section eyebrow="1.6" title="Objetivos">
+        <div className="grid gap-4 md:grid-cols-2">
+          <Card title="Do usuário">
+            <ul className="list-disc space-y-1 pl-5">
+              <li>Saber, agora, quanto pode gastar sem se comprometer.</li>
+              <li>Reduzir ansiedade nas semanas próximas do fechamento.</li>
+              <li>Simular decisões antes de tomá-las.</li>
+              <li>Chegar no fim do mês sem sustos.</li>
+            </ul>
+          </Card>
+          <Card title="Do produto">
+            <ul className="list-disc space-y-1 pl-5">
+              <li>Devolver 1 número claro em menos de 2 segundos.</li>
+              <li>Modelar corretamente ciclos de cartão (fechamento/vencimento).</li>
+              <li>Ser um <em>assistente de decisão</em>, não mais um extrato.</li>
+              <li>Servir de case reprodutível de engenharia de software.</li>
+            </ul>
+          </Card>
+        </div>
+      </Section>
+
+      {/* 7. LinkedIn draft */}
+      <Section eyebrow="1.7" title="Rascunho do post no LinkedIn">
+        <div className="rounded-lg border border-border bg-parchment p-6 font-sans text-[15px] leading-relaxed text-foreground/90">
+          <p>
+            Comecei um projeto para resolver um problema que me incomoda há anos: nunca
+            consegui responder, no momento da compra, quanto eu realmente posso gastar no
+            cartão de crédito considerando salário, contas fixas, parcelas em aberto e as
+            datas de fechamento das faturas.
+          </p>
+          <p className="mt-3">
+            Todos os apps financeiros que testei mostram muito bem <em>quanto eu já gastei</em>.
+            Nenhum me diz, de forma acionável, <em>quanto eu ainda posso gastar sem me
+            atrapalhar no próximo mês</em>.
+          </p>
+          <p className="mt-3">
+            Vou construir esse produto em público, fase por fase, seguindo boas práticas de
+            Product Management, UX, Engenharia de Software e Arquitetura de Sistemas —
+            começando por Descoberta do Problema (Design Thinking + Double Diamond) e indo
+            até deploy, testes e evolução.
+          </p>
+          <p className="mt-3">
+            Hoje concluí a <strong>Fase 1 — Descoberta do problema</strong>: definição do
+            problema, personas, stakeholders, jornada, dores e objetivos.
+          </p>
+          <p className="mt-3 text-muted-foreground">
+            Próxima parada: pesquisa de mercado e benchmark (Mobills, Organizze, YNAB, Copilot
+            Money, Monarch Money).
+          </p>
+        </div>
+      </Section>
+
+      {/* Nav */}
+      <div className="mt-16 flex items-center justify-between border-t border-border pt-8">
+        <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">
+          ← Roadmap
+        </Link>
+        <span className="text-sm text-muted-foreground">Próxima: Fase 2 — Pesquisa</span>
+      </div>
+    </main>
+  );
+}
+
+
+import { createFileRoute, Link } from "@tanstack/react-router";
+
+export const Route = createFileRoute("/")({
+  component: Index,
+});
+
+const phases = [
+  { n: "01", title: "Descoberta do problema", status: "Concluído", href: "/fase-1" as const },
+  { n: "02", title: "Pesquisa e benchmark", status: "A fazer" },
+  { n: "03", title: "Engenharia de requisitos", status: "A fazer" },
+  { n: "04", title: "Modelagem do negócio", status: "A fazer" },
+  { n: "05", title: "Modelagem UML", status: "A fazer" },
+  { n: "06", title: "Arquitetura do sistema", status: "A fazer" },
+  { n: "07", title: "Modelagem do banco", status: "A fazer" },
+  { n: "08", title: "UX/UI e protótipo", status: "A fazer" },
+  { n: "09", title: "System design", status: "A fazer" },
+  { n: "10", title: "Desenvolvimento", status: "A fazer" },
+  { n: "11", title: "Testes", status: "A fazer" },
+  { n: "12", title: "Deploy", status: "A fazer" },
+  { n: "13", title: "Evolução", status: "A fazer" },
+];
+
+function Index() {
+  return (
+    <main>
+      {/* Hero */}
+      <section className="mx-auto max-w-5xl px-6 pt-20 pb-16">
+        <p className="text-sm uppercase tracking-[0.2em] text-accent">
+          Case público · Product + UX + Engenharia
+        </p>
+        <h1 className="mt-6 font-serif text-5xl leading-[1.05] text-foreground sm:text-6xl md:text-7xl">
+          Quanto posso gastar hoje{" "}
+          <em className="text-accent">sem comprometer</em> meu orçamento futuro?
+        </h1>
+        <p className="mt-8 max-w-2xl text-lg leading-relaxed text-muted-foreground">
+          A maioria dos apps financeiros mostra quanto você <em>já gostou</em>. Este projeto
+          nasce para responder a pergunta que realmente importa antes de passar o cartão —
+          e vai ser construído em público, fase a fase, seguindo boas práticas de Design
+          Thinking, Engenharia de Requisitos, UML, Clean Architecture e System Design.
+        </p>
+        <div className="mt-10 flex flex-wrap gap-3">
+          <Link
+            to="/app"
+            className="inline-flex items-center rounded-md bg-primary px-5 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Ver MVP funcional →
+          </Link>
+          <Link
+            to="/fase-1"
+            className="inline-flex items-center rounded-md border border-input px-5 py-3 text-sm font-medium text-foreground hover:bg-secondary"
+          >
+            Ler a Fase 1
+          </Link>
+          <a
+            href="#roadmap"
+            className="inline-flex items-center rounded-md border border-input px-5 py-3 text-sm font-medium text-foreground hover:bg-secondary"
+          >
+            Ver roadmap completo
+          </a>
+        </div>
+      </section>
+
+      {/* Diferencial */}
+      <section className="border-y border-border/70 bg-card">
+        <div className="mx-auto grid max-w-5xl gap-10 px-6 py-16 md:grid-cols-3">
+          <div>
+            <p className="font-serif text-3xl text-foreground">Registrar</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              O que os apps atuais fazem: mostrar o passado.
+            </p>
+          </div>
+          <div>
+            <p className="font-serif text-3xl text-foreground">Projetar</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Considerar salário, contas fixas, parcelas, fechamento e vencimento de cartões.
+            </p>
+          </div>
+          <div>
+            <p className="font-serif text-3xl text-accent">Decidir</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              “Você pode gastar R$ 842,15 neste cartão até o fechamento.” Assistente de decisão.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Roadmap */}
+      <section id="roadmap" className="mx-auto max-w-5xl px-6 py-20">
+        <div className="mb-10 flex items-end justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.2em] text-accent">Roadmap</p>
+            <h2 className="mt-2 font-serif text-4xl text-foreground">13 fases, em público</h2>
+          </div>
+          <p className="hidden max-w-xs text-sm text-muted-foreground md:block">
+            Cada fase vira um artefato aqui + um post no LinkedIn.
+          </p>
+        </div>
+
+        <ol className="divide-y divide-border border-y border-border">
+          {phases.map((p) => {
+            const inner = (
+              <div className="flex items-center justify-between gap-6 py-5">
+                <div className="flex items-baseline gap-6">
+                  <span className="font-serif text-2xl text-muted-foreground">{p.n}</span>
+                  <span className="text-lg text-foreground">{p.title}</span>
+                </div>
+                <span
+                  className={
+                    "text-xs uppercase tracking-widest " +
+                    (p.status === "Em andamento"
+                      ? "text-accent"
+                      : "text-muted-foreground")
+                  }
+                >
+                  {p.status}
+                </span>
+              </div>
+            );
+            return (
+              <li key={p.n}>
+                {p.href ? (
+                  <Link to={p.href} className="block transition-colors hover:bg-secondary/60 px-2 -mx-2 rounded">
+                    {inner}
+                  </Link>
+                ) : (
+                  <div className="px-2 -mx-2 opacity-70">{inner}</div>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+    </main>
+  );
 }
